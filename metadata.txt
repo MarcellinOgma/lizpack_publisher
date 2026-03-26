@@ -1,0 +1,14 @@
+[general]
+name=LizPack Publisher
+qgisMinimumVersion=3.16
+description=Gérez vos projets QGIS directement depuis votre instance LizPack
+version=1.0.0
+author=LizPack / GEODONNÉE INC
+email=support@lizpack.com
+about=Publiez des dossiers, gérez vos fichiers et accédez à vos données PostGIS sur LizPack sans quitter QGIS.
+tags=lizmap, qgis server, lizpack, webgis, publish
+homepage=https://lizpack.com
+category=Web
+icon=icon.svg
+experimental=False
+deprecated=False

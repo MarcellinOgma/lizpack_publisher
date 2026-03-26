@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- LizPack logo: folded map icon -->
+  <path d="M8 12 L22 6 L36 12 L50 6 L56 9 L56 52 L50 55 L36 49 L22 55 L8 49 Z"
+        stroke="#2d8a4e" stroke-width="4" stroke-linejoin="round" fill="#e8f5e9"/>
+  <line x1="22" y1="6" x2="22" y2="55" stroke="#2d8a4e" stroke-width="3"/>
+  <line x1="36" y1="12" x2="36" y2="49" stroke="#2d8a4e" stroke-width="3"/>
+  <line x1="50" y1="6" x2="50" y2="55" stroke="#2d8a4e" stroke-width="3"/>
+</svg>
