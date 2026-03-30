@@ -24,7 +24,7 @@ from qgis.PyQt.QtCore import QSettings
 # ── Changer cette constante pour passer en production ──────────────────────
 # ACCEPT : https://acceptapi.lizpack.com
 # PROD   : https://api.lizpack.com
-API_BASE = 'https://acceptapi.lizpack.com'
+API_BASE = 'https://api.lizpack.com'
 
 
 class LizpackSession:
