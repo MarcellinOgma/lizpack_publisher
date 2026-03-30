@@ -670,8 +670,8 @@ class LizpackDialog(QDialog):
 
     # ── Onglet Aide / Documentation ──────────────────────────────────
     def _tab_docs(self):
-        # NOTE prod : remplacer accept.lizpack.com par lizpack.com
-        _SUPPORT_URL = 'https://accept.lizpack.com/client/aide-support'
+        
+        _SUPPORT_URL = 'https://help.lizpack.com'
 
         from qgis.PyQt.QtWidgets import QScrollArea
 
@@ -780,7 +780,7 @@ class LizpackDialog(QDialog):
             'L\'onglet Projets affiche vos fichiers. Double-cliquez sur un dossier pour y entrer. '
             'Utilisez ← Retour pour remonter.'))
         v.addWidget(_tip(
-            'Vos identifiants sont ceux de votre espace client LIZPACK (accept.lizpack.com).',
+            'Vos identifiants sont ceux de votre espace client LIZPACK (lizpack.com).',
             'info'))
 
         # ══════════════════════════════════════════════════════════════
