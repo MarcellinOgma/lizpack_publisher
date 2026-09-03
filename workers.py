@@ -3,9 +3,68 @@ workers.py
 ──────────
 QThreads non-bloquants pour les opérations longues.
 """
+import io
 import os
+import shutil
+import zipfile
 import xml.etree.ElementTree as ET
 from qgis.PyQt.QtCore import QThread, pyqtSignal
+
+try:
+    from defusedxml.ElementTree import fromstring as _defused_fromstring
+except ImportError:      # defusedxml n'est pas fourni avec QGIS
+    _defused_fromstring = None
+
+
+def parse_qgs_xml(xml_text):
+    """Parse le XML d'un .qgs venant du serveur, sans exposer QGIS aux
+    attaques XML (entites externes / XXE, billion laughs).
+
+    Utilise defusedxml s'il est disponible, sinon un parseur expat durci.
+    NB : la DOCTYPE reste acceptee — QGIS en ecrit une dans chaque .qgs
+    (<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>) ; ce sont
+    les DECLARATIONS D'ENTITES qui sont refusees, et c'est par elles que
+    passent XXE et les bombes d'expansion.
+    Leve ET.ParseError comme ET.fromstring.
+    """
+    if _defused_fromstring is not None:
+        try:
+            return _defused_fromstring(xml_text)
+        except ET.ParseError:
+            raise
+        except Exception as exc:
+            # DefusedXmlException (entite interdite) -> traite comme un XML invalide
+            raise ET.ParseError(str(exc))
+
+    # Pas de defusedxml : on pilote expat directement, car les handlers
+    # poses sur ET.XMLParser().parser sont ignores par l'accelerateur C.
+    import xml.parsers.expat
+
+    builder = ET.TreeBuilder()
+    # separateur "}" + prefixe "{" : memes noms qualifies que ET.fromstring
+    expat = xml.parsers.expat.ParserCreate(None, '}')
+
+    def _forbid_entity(*_args, **_kwargs):
+        raise ET.ParseError("Declaration d'entite XML interdite")
+
+    expat.EntityDeclHandler = _forbid_entity
+    expat.UnparsedEntityDeclHandler = _forbid_entity
+    expat.ExternalEntityRefHandler = lambda *_a, **_k: False
+    expat.StartElementHandler = lambda tag, attrs: builder.start(
+        ('{' + tag) if '}' in tag else tag,
+        {(('{' + k) if '}' in k else k): v for k, v in attrs.items()},
+    )
+    expat.EndElementHandler = lambda tag: builder.end(
+        ('{' + tag) if '}' in tag else tag
+    )
+    expat.CharacterDataHandler = builder.data
+
+    try:
+        expat.Parse(xml_text, True)
+    except xml.parsers.expat.ExpatError as exc:
+        raise ET.ParseError(str(exc))
+
+    return builder.close()
 
 
 class ListFilesWorker(QThread):
@@ -45,6 +104,26 @@ class LoginWorker(QThread):
             self.error.emit(str(e))
 
 
+class ListeInstancesWorker(QThread):
+    """Redemande la liste des instances, sans refaire l'authentification.
+
+    Sert au changement d'espace de travail : le jeton reste valable, seul
+    le contexte d'equipe change.
+    """
+    finished = pyqtSignal(list)
+    error    = pyqtSignal(str)
+
+    def __init__(self, session):
+        super().__init__()
+        self.session = session
+
+    def run(self):
+        try:
+            self.finished.emit(self.session._get_instances())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class ConnectInstanceWorker(QThread):
     """Étape 2 : récupère les credentials SFTP et teste la connexion."""
     finished = pyqtSignal()
@@ -60,28 +139,6 @@ class ConnectInstanceWorker(QThread):
         try:
             self.session.connect_instance(self.instance_id, self.instance_name)
             self.finished.emit()
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class UploadFolderWorker(QThread):
-    progress = pyqtSignal(int, int, str)
-    finished = pyqtSignal(int)
-    error    = pyqtSignal(str)
-
-    def __init__(self, session, local_folder, remote_folder):
-        super().__init__()
-        self.session       = session
-        self.local_folder  = local_folder
-        self.remote_folder = remote_folder
-
-    def run(self):
-        try:
-            count = self.session.upload_folder(
-                self.local_folder, self.remote_folder,
-                progress_cb=lambda cur, tot, fname: self.progress.emit(cur, tot, fname),
-            )
-            self.finished.emit(count)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -108,19 +165,24 @@ class DownloadProjectWorker(QThread):
     def run(self):
         try:
             self.session.clear_cache()
+            srv_parts  = self.server_path.rstrip('/').split('/')
+            server_dir = '/'.join(srv_parts[:-1]) or '/'
+            local_dir  = os.path.dirname(self.local_path)
 
-            # 1. Télécharger le fichier projet
-            data = self.session.download(self.file_id)
-            with open(self.local_path, 'wb') as f:
-                f.write(data)
-            self.status.emit(f'  ✓ {os.path.basename(self.local_path)} téléchargé')
-
-            # 2. Télécharger les données référencées (uniquement pour .qgs)
-            if self.local_path.lower().endswith('.qgs'):
+            # 1. Voie rapide : tout le dossier en UNE requete.
+            if not self._rapatrier_en_archive(server_dir, local_dir):
+                # 2. Repli fichier par fichier si le serveur ne sait pas
+                #    produire d'archive, ou si elle n'est pas exploitable.
+                data = self.session.download(self.file_id)
+                with open(self.local_path, 'wb') as f:
+                    f.write(data)
+                self.status.emit(f'  ✓ {os.path.basename(self.local_path)} téléchargé')
                 try:
-                    self._download_dependencies(data.decode('utf-8', errors='ignore'))
+                    self.session.clear_cache()
+                    n = self._miroir_dossier(server_dir, local_dir)
+                    self.status.emit(f'  {n} fichier(s) rapatrié(s) depuis {server_dir}')
                 except Exception as e:
-                    self.status.emit(f'Avertissement dépendances : {e}')
+                    self.status.emit(f'Avertissement arborescence : {e}')
 
             # 3. Valider l'intégrité du téléchargement
             missing = self._validate_download()
@@ -134,79 +196,122 @@ class DownloadProjectWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
-    def _download_dependencies(self, qgs_xml):
-        """
-        Parse le XML du .qgs, liste le dossier serveur UNE FOIS,
-        puis télécharge tous les fichiers nécessaires par ID (pas de listing répété).
+    def _rapatrier_en_archive(self, server_dir, local_dir):
+        """Rapatrie le dossier entier en une seule requete.
+
+        Fichier par fichier, il fallait un aller-retour HTTP par fichier et
+        un par sous-dossier : sur un projet et ses donnees, la latence
+        pesait plus lourd que les octets transferes. Le serveur sait
+        assembler l'archive lui-meme, en parcourant les sous-dossiers et en
+        restaurant les projets comme sur un telechargement unitaire.
+
+        Retourne False si l'archive n'a pas pu etre obtenue ou exploitee :
+        l'appelant retombe alors sur la methode fichier par fichier.
         """
         try:
-            root = ET.fromstring(qgs_xml)
-        except ET.ParseError:
-            return
+            items = self.session.list_files(server_dir)
+        except Exception as e:
+            self.status.emit(f'  dossier illisible ({e})')
+            return False
 
-        local_dir  = os.path.dirname(self.local_path)
-        srv_parts  = self.server_path.rstrip('/').split('/')
-        server_dir = '/'.join(srv_parts[:-1])
-        if not server_dir:
-            server_dir = '/'
+        ids = [it['id'] for it in items]
+        if not ids:
+            return False
 
-        # 1. Collecter tous les fichiers nécessaires depuis le .qgs
-        needed = set()
-        for elem in root.iter('datasource'):
-            raw = (elem.text or '').strip()
-            if not raw:
-                continue
-            rel = self._extract_relative_path(raw)
-            if not rel:
-                continue
-            needed.add(rel)
-            # Compagnons shapefile
-            if rel.lower().endswith('.shp'):
-                base = rel[:-4]
-                for ext in self._SHP_COMPANIONS:
-                    needed.add(base + ext)
-
-        for elem in root.iter('styleURI'):
-            raw = (elem.text or '').strip()
-            rel = self._extract_relative_path(raw)
-            if rel:
-                needed.add(rel)
-
-        if not needed:
-            return
-
-        # 2. Lister le dossier serveur UNE FOIS → map nom→ID
+        self.status.emit(f'  {len(ids)} élément(s) — récupération en une archive…')
         try:
-            items = self.session._list_files_cached(server_dir)
-        except Exception:
-            items = []
-        name_to_id = {it['name']: it['id'] for it in items if not it['is_dir']}
+            brut = self.session.download_folder_zip(ids)
+        except Exception as e:
+            self.status.emit(f'  archive indisponible ({e}) — repli fichier par fichier')
+            return False
 
-        # 3. Télécharger chaque fichier par son ID (pas de listing supplémentaire)
-        self.status.emit(f'  {len(needed)} dépendance(s) à télécharger…')
-        for rel in sorted(needed):
-            fname = os.path.basename(rel)
-            local_file = os.path.join(local_dir, rel.replace('/', os.sep))
-            fid = name_to_id.get(fname)
+        if not brut or brut[:2] != b'PK':
+            self.status.emit('  réponse inattendue — repli fichier par fichier')
+            return False
 
-            if fid is None:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext in self._SHP_CRITICAL:
-                    self.status.emit(f'  ⚠ {fname} MANQUANT sur le serveur')
+        prefixe = server_dir.strip('/')
+        racine  = os.path.abspath(local_dir)
+        ecrits  = 0
+        try:
+            with zipfile.ZipFile(io.BytesIO(brut)) as archive:
+                for nom in archive.namelist():
+                    rel = nom
+                    if prefixe and rel.startswith(prefixe + '/'):
+                        rel = rel[len(prefixe) + 1:]
+                    if not rel or rel.endswith('/'):
+                        continue
+
+                    cible = os.path.abspath(
+                        os.path.join(racine, rel.replace('/', os.sep))
+                    )
+                    # Une archive peut contenir des chemins remontants : ne
+                    # jamais ecrire hors du dossier de destination.
+                    if cible != racine and not cible.startswith(racine + os.sep):
+                        self.status.emit(f'  ⚠ entrée hors dossier ignorée : {nom}')
+                        continue
+
+                    os.makedirs(os.path.dirname(cible), exist_ok=True)
+                    with archive.open(nom) as source, open(cible, 'wb') as dest:
+                        shutil.copyfileobj(source, dest)
+                    ecrits += 1
+        except zipfile.BadZipFile as e:
+            self.status.emit(f'  archive illisible ({e}) — repli fichier par fichier')
+            return False
+
+        if not os.path.isfile(self.local_path):
+            self.status.emit('  projet absent de l\'archive — repli fichier par fichier')
+            return False
+
+        self.status.emit(f'  {ecrits} fichier(s) rapatrié(s) en une requête')
+        return True
+
+    def _miroir_dossier(self, server_dir, local_dir):
+        """Recopie le dossier serveur et tous ses sous-dossiers en local.
+
+        Un projet reference ses donnees en relatif, souvent depuis un
+        sous-dossier. Rapatrier l'arborescence entiere est le seul moyen
+        fiable de rouvrir le projet tel quel : resoudre chemin par chemin
+        obligeait a deviner ou chaque fichier se trouve, et manquait tout
+        ce qui n'etait pas cite explicitement (qml, index, .qgd...).
+
+        Retourne le nombre de fichiers ecrits.
+        """
+        ecrits = 0
+        a_traiter = [(server_dir, local_dir)]
+        vus = set()
+
+        while a_traiter:
+            srv, loc = a_traiter.pop(0)
+            cle = srv.rstrip('/') or '/'
+            if cle in vus:
                 continue
+            vus.add(cle)
 
             try:
-                os.makedirs(os.path.dirname(local_file), exist_ok=True)
-                data = self.session.download(fid)
-                if not data:
-                    raise Exception('Contenu vide')
-                with open(local_file, 'wb') as f:
-                    f.write(data)
-                self.status.emit(f'  ↳ {fname} ({len(data)} octets)')
+                items = self.session.list_files(srv)
             except Exception as e:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext in self._SHP_CRITICAL:
-                    self.status.emit(f'  ⚠ {fname} ERREUR — {e}')
+                self.status.emit(f'  ⚠ dossier {srv} illisible — {e}')
+                continue
+
+            os.makedirs(loc, exist_ok=True)
+            for it in items:
+                cible = os.path.join(loc, it['name'])
+                if it['is_dir']:
+                    a_traiter.append((it['api_path'], cible))
+                    continue
+                # Le fichier projet a deja ete ecrit par run()
+                if os.path.abspath(cible) == os.path.abspath(self.local_path):
+                    continue
+                try:
+                    contenu = self.session.download(it['id'])
+                    with open(cible, 'wb') as f:
+                        f.write(contenu)
+                    ecrits += 1
+                    self.status.emit(f'  ↳ {it["name"]} ({len(contenu)} octets)')
+                except Exception as e:
+                    self.status.emit(f'  ⚠ {it["name"]} — {e}')
+
+        return ecrits
 
     @staticmethod
     def _extract_relative_path(src):
@@ -241,29 +346,6 @@ class DownloadProjectWorker(QThread):
     # Extensions critiques d'un shapefile (sans lesquelles la couche est cassée)
     _SHP_CRITICAL = ('.shx', '.dbf')
 
-    def _fetch(self, server_path, local_path, silent=False):
-        """Télécharge un fichier serveur → local. Crée les dossiers si besoin.
-        Retourne True si le fichier a été téléchargé, False sinon.
-        """
-        fname = os.path.basename(server_path)
-        try:
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            data = self.session.download_by_path(server_path)
-            if not data:
-                raise Exception('Contenu vide')
-            with open(local_path, 'wb') as f:
-                f.write(data)
-            self.status.emit(f'  ↳ {fname} ({len(data)} octets)')
-            return True
-        except Exception as e:
-            # Les fichiers compagnons critiques ne doivent PAS être silencieux
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in self._SHP_CRITICAL:
-                self.status.emit(f'  ⚠ {fname} MANQUANT — {e}')
-            elif not silent:
-                self.status.emit(f'  ↳ {fname} introuvable (ignoré)')
-            return False
-
     def _validate_download(self):
         """Vérifie que tous les fichiers référencés dans le .qgs existent localement."""
         missing = []
@@ -273,7 +355,7 @@ class DownloadProjectWorker(QThread):
         try:
             with open(self.local_path, 'r', encoding='utf-8', errors='ignore') as f:
                 qgs_xml = f.read()
-            root = ET.fromstring(qgs_xml)
+            root = parse_qgs_xml(qgs_xml)
         except Exception:
             return missing
 
@@ -307,6 +389,7 @@ class SaveSymbologyWorker(QThread):
     """Publie un projet .qgs en réécrivant les connexions PostGIS
     pour qu'elles pointent vers la BDD interne de l'instance."""
     finished = pyqtSignal()
+    status   = pyqtSignal(str)
     error    = pyqtSignal(str)
 
     def __init__(self, session, local_path, api_path):
@@ -320,96 +403,128 @@ class SaveSymbologyWorker(QThread):
             upload_path = self.local_path
             local_dir = os.path.dirname(self.local_path)
             api_dir   = '/'.join(self.api_path.rstrip('/').split('/')[:-1]) or '/'
+            nom_projet = os.path.basename(self.api_path)
 
             # Réécrire les datasources PostGIS si c'est un .qgs
             if self.local_path.lower().endswith('.qgs'):
                 try:
                     upload_path = self._rewrite_pg_datasources()
-                except Exception:
+                except Exception as e:
+                    # Publier sans reecriture donne un projet que Lizmap ne
+                    # peut pas ouvrir : la panne doit se voir. C'est ce
+                    # except, muet jusqu'ici, qui a caché pendant des mois
+                    # une AttributeError dans rewrite_pg().
                     upload_path = self.local_path
+                    self.status.emit(
+                        f'  ⚠ connexions PostGIS NON réécrites ({e}). '
+                        'Le projet publié gardera ses adresses locales.'
+                    )
 
-            # 1. Uploader le .qgs (réécrit ou original)
-            self.session.replace_file(upload_path, self.api_path)
+            # Tout part en UNE requete. Un envoi par fichier faisait payer la
+            # latence autant de fois qu'il y a de couches : sur un projet
+            # ordinaire, l'attente venait des aller-retours, pas des octets.
+            # Le nom d'arrivee vient du chemin relatif, pas du nom du fichier
+            # envoye : le .qgs reecrit, qui porte un nom temporaire, arrive
+            # donc bien sous le nom voulu.
+            envois = [(upload_path, nom_projet)]
 
-            # Nettoyer le fichier temporaire
-            if upload_path != self.local_path:
-                try:
-                    os.remove(upload_path)
-                except Exception:
-                    pass
+            cfg_local = self.local_path + '.cfg'
+            if os.path.isfile(cfg_local):
+                envois.append((cfg_local, nom_projet + '.cfg'))
 
-            # 2. Uploader le .qgs.cfg (config Lizmap) s'il existe
-            base = self.local_path
-            for cfg_ext in ('.cfg', '.qgs.cfg'):
-                cfg_local = base + cfg_ext if cfg_ext == '.cfg' else base + '.cfg'
-                if os.path.isfile(cfg_local):
-                    cfg_api = self.api_path + '.cfg'
-                    self.session.replace_file(cfg_local, cfg_api)
-                    break
-
-            # 3. Uploader les fichiers de données locales référencés
             if self.local_path.lower().endswith('.qgs'):
-                self._upload_local_dependencies(local_dir, api_dir)
+                envois.extend(self._dependances_locales(local_dir))
+
+            self.status.emit(f'  {len(envois)} fichier(s) à publier…')
+            try:
+                self.session.upload_batch(
+                    envois, api_dir,
+                    progress_cb=lambda cur, tot, nom: self.status.emit(f'  {nom}'),
+                )
+            finally:
+                # Nettoyer le .qgs temporaire, meme si l'envoi a echoue
+                if upload_path != self.local_path:
+                    try:
+                        os.remove(upload_path)
+                    except Exception:
+                        pass
 
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
 
-    def _upload_local_dependencies(self, local_dir, api_dir):
-        """Upload les fichiers de données locales (shapefiles, gpkg, etc.)
-        référencés par le projet .qgs."""
+    def _dependances_locales(self, local_dir):
+        """Liste les donnees locales que le projet reference.
+
+        Retourne des couples (chemin local, chemin relatif) prets pour un
+        envoi groupe. Les fichiers absents du disque sont ignores : une
+        couche PostGIS ou un service WMS n'a rien a envoyer.
+        """
         try:
             with open(self.local_path, 'r', encoding='utf-8', errors='ignore') as f:
-                qgs_xml = f.read()
-            root = ET.fromstring(qgs_xml)
+                racine = parse_qgs_xml(f.read())
+        except Exception:
+            return []
+
+        envois = []
+        vus = set()
+
+        def ajouter(rel):
+            if rel in vus:
+                return
+            local = os.path.join(local_dir, rel.replace('/', os.sep))
+            if not os.path.isfile(local):
+                return
+            vus.add(rel)
+            envois.append((local, rel))
+
+        for elem in racine.iter('datasource'):
+            brut = (elem.text or '').strip()
+            if not brut:
+                continue
+            rel = DownloadProjectWorker._extract_relative_path(brut)
+            if not rel:
+                continue
+            ajouter(rel)
+            if rel.lower().endswith('.shp'):
+                base = rel[:-4]
+                for ext in ('.shx', '.dbf', '.prj', '.cpg', '.qix', '.qml', '.qpj'):
+                    ajouter(base + ext)
+
+        return envois
+
+    def _avertir_sans_reecriture(self, raison):
+        """Signale qu'un projet part sans que ses connexions soient reecrites.
+
+        Ne le dire que si le projet contient vraiment du PostGIS : sur un
+        projet fait de shapefiles, l'absence de reecriture est normale et
+        l'avertissement serait du bruit.
+        """
+        try:
+            with open(self.local_path, 'r', encoding='utf-8', errors='ignore') as f:
+                contenu = f.read()
         except Exception:
             return
-
-        uploaded = set()
-        for elem in root.iter('datasource'):
-            raw = (elem.text or '').strip()
-            if not raw:
-                continue
-            rel = DownloadProjectWorker._extract_relative_path(raw)
-            if not rel or rel in uploaded:
-                continue
-
-            local_file = os.path.join(local_dir, rel.replace('/', os.sep))
-            if not os.path.isfile(local_file):
-                continue
-
-            uploaded.add(rel)
-            api_path = api_dir.rstrip('/') + '/' + rel
-            try:
-                self.session.replace_file(local_file, api_path)
-            except Exception:
-                pass
-
-            # Compagnons shapefile
-            if rel.lower().endswith('.shp'):
-                base_rel = rel[:-4]
-                for ext in ('.shx', '.dbf', '.prj', '.cpg', '.qix', '.qml', '.qpj'):
-                    comp_rel = base_rel + ext
-                    comp_local = os.path.join(local_dir, comp_rel.replace('/', os.sep))
-                    if os.path.isfile(comp_local) and comp_rel not in uploaded:
-                        uploaded.add(comp_rel)
-                        try:
-                            self.session.replace_file(
-                                comp_local,
-                                api_dir.rstrip('/') + '/' + comp_rel,
-                            )
-                        except Exception:
-                            pass
+        if 'dbname=' not in contenu:
+            return
+        self.status.emit(
+            f'  ⚠ connexions PostGIS NON réécrites : {raison}. '
+            'Lizmap ne pourra pas joindre la base.'
+        )
 
     def _rewrite_pg_datasources(self):
         """Réécrit les connexions PostGIS du .qgs pour utiliser
         les credentials internes de l'instance (réseau Docker).
         Retourne le chemin du fichier modifié (temp).
         """
-        import re, tempfile
+        import re
+        import tempfile
 
         d = self.session._instance_data
         if not d:
+            self._avertir_sans_reecriture(
+                "les informations de l'instance n'ont pas été récupérées"
+            )
             return self.local_path
 
         # Credentials internes du serveur
@@ -420,14 +535,21 @@ class SaveSymbologyWorker(QThread):
         target_pass = d.get('db_password', '')
 
         if not target_host or not target_user:
+            self._avertir_sans_reecriture(
+                "l'instance n'expose ni adresse ni utilisateur de base"
+            )
             return self.local_path
 
         with open(self.local_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
 
-        # Réécrire chaque datasource PostGIS
-        def rewrite_pg(match):
-            ds = match.group(0)
+        # Réécrire chaque datasource PostGIS.
+        # NB : cette fonction recoit le CONTENU de la balise, deja extrait par
+        # l'appelant, pas un objet de correspondance. Elle appelait
+        # match.group(0) et levait donc AttributeError a chaque projet ; le
+        # try/except de l'appelant avalait l'erreur et publiait le projet sans
+        # aucune reecriture. La panne etait totale et silencieuse.
+        def rewrite_pg(ds):
             # Ne réécrire que si c'est bien une connexion PG
             if 'dbname=' not in ds:
                 return ds
@@ -569,6 +691,83 @@ class UploadFolderWorker(QThread):
             self.finished.emit(count)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class _FilBase(QThread):
+    """Ouvre une connexion psycopg2 vers la base de l'instance."""
+
+    def __init__(self, pg):
+        super().__init__()
+        self.pg = pg
+
+    def _connexion(self):
+        import psycopg2
+        return psycopg2.connect(
+            host=self.pg['host'], port=self.pg['port'],
+            dbname=self.pg['dbname'], user=self.pg['user'],
+            password=self.pg['password'], connect_timeout=15,
+        )
+
+
+class DiagnosticDbWorker(_FilBase):
+    """Analyse la base sans rien y modifier."""
+    finished = pyqtSignal(list)   # [Probleme]
+    status   = pyqtSignal(str)
+    error    = pyqtSignal(str)
+
+    def run(self):
+        connexion = None
+        try:
+            from .optimisation import diagnostiquer
+            self.status.emit('Connexion à la base…')
+            connexion = self._connexion()
+            curseur = connexion.cursor()
+            problemes = diagnostiquer(curseur, journal=self.status.emit)
+            curseur.close()
+            self.finished.emit(problemes)
+        except ImportError:
+            self.error.emit(
+                'psycopg2 est absent de cette installation de QGIS : '
+                "le diagnostic de la base n'est pas disponible."
+            )
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            if connexion is not None:
+                try:
+                    connexion.close()
+                except Exception:
+                    pass
+
+
+class OptimiserDbWorker(_FilBase):
+    """Applique les corrections sures retenues par le diagnostic."""
+    finished = pyqtSignal(list, list)   # reussies, echouees
+    status   = pyqtSignal(str)
+    error    = pyqtSignal(str)
+
+    def __init__(self, pg, problemes):
+        super().__init__(pg)
+        self.problemes = problemes
+
+    def run(self):
+        connexion = None
+        try:
+            from .optimisation import appliquer
+            self.status.emit('Connexion à la base…')
+            connexion = self._connexion()
+            reussies, echouees = appliquer(
+                connexion, self.problemes, journal=self.status.emit,
+            )
+            self.finished.emit(reussies, echouees)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            if connexion is not None:
+                try:
+                    connexion.close()
+                except Exception:
+                    pass
 
 
 class ImportToPostGISWorker(QThread):
