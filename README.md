@@ -121,15 +121,19 @@ plugin/
 │   ├── api_client.py      — client HTTP de l'API (contient API_BASE)
 │   ├── workers.py         — QThreads non bloquants
 │   ├── optimisation.py    — diagnostic et corrections PostGIS
-│   ├── .flake8            — configuration du linter, livrée dans le zip
+│   ├── journal.py         — trace les erreurs sans gravité
 │   ├── icon.png / icon.svg
 │   └── metadata.txt
+├── .flake8                 — configuration du linter, hors du paquet
 └── install_plugin.bat
 ```
 
-Le fichier `.flake8` doit rester **dans** `lizpack_publisher/` : c'est ce
-dossier seul qui est empaqueté pour le dépôt QGIS, et donc le seul endroit où
-le validateur le lira.
+Le fichier `.flake8` doit rester **hors** de `lizpack_publisher/`. Le
+validateur du dépôt QGIS signale toute configuration d'outil livrée avec un
+plugin et déclasse la validation en « Validated (configured) », un
+administrateur devant alors vérifier à la main quelles règles ont été
+assouplies. Il ne s'agit ici que de mise en forme — longueur de ligne et
+alignement — ce qui ne justifie pas de faire douter de l'analyse de sécurité.
 
 ---
 

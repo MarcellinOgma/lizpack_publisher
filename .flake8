@@ -1,8 +1,17 @@
 # Linter du plugin QGIS LizPack Publisher.
 #
-# Ce fichier doit rester DANS lizpack_publisher/ : c'est ce dossier seul
-# qui est empaquete dans le zip envoye au depot QGIS, et donc le seul
-# endroit ou le validateur du depot verra la configuration.
+# Ce fichier doit rester HORS de lizpack_publisher/, donc hors du zip
+# envoye au depot QGIS. Le validateur du depot signale toute
+# configuration d'outil livree avec un plugin — .flake8, .bandit,
+# .secrets.baseline — et declasse la validation en « Validated
+# (configured) », un administrateur devant alors verifier a la main
+# quelles regles ont ete assouplies. Ici, il ne s'agit que de mise en
+# forme ; ce n'est pas un motif suffisant pour faire douter de l'analyse
+# de securite.
+#
+# Consequence assumee : le controle de style du depot signalera environ
+# 475 emplois de longueur de ligne et d'alignement. Aucun ne bloque la
+# publication.
 #
 # Regles desactivees volontairement — choix de style assumes du plugin :
 #   E221/E222/E241  alignement des affectations et des dicts en colonnes
