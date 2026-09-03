@@ -10,6 +10,7 @@ tags=lizmap, qgis server, lizpack, webgis, publish, postgis, database
 homepage=https://lizpack.com
 repository=https://github.com/MarcellinOgma/lizpack_publisher
 tracker=https://github.com/MarcellinOgma/lizpack_publisher/issues
+license=GPL-3.0-or-later
 category=Web
 icon=icon.svg
 experimental=False

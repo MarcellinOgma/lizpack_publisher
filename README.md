@@ -167,3 +167,19 @@ module plutôt que détruits.
 **Identifiants SQL.** Tout nom venant du catalogue passe par `citer()`, qui
 double les guillemets internes. Un nom de table forgé ne peut pas rompre la
 citation.
+
+---
+
+## Licence
+
+GNU General Public License v3.0 ou ultérieure — voir [LICENSE](LICENSE).
+
+Ce choix n'est pas discrétionnaire : un plugin QGIS importe `qgis.core`,
+`qgis.gui` et PyQt5, tous sous GPL. Distribué publiquement, il constitue une
+œuvre dérivée et doit porter une licence compatible. La GPL interdit d'ajouter
+une restriction d'usage — « non commercial » notamment — ce qui rend ce type de
+clause impossible ici.
+
+En pratique, la GPL protège le travail : quiconque redistribue le plugin, même
+contre paiement, doit en fournir le code source sous la même licence. Personne
+ne peut le refermer.
