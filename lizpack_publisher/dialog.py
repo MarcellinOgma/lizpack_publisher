@@ -961,7 +961,11 @@ class LizpackDialog(QDialog):
         self.tabs.addTab(t_upld, _icon('upload-cloud', _C_PRIMARY, 15), '  Upload')
         self.tabs.addTab(t_pg,   _icon('database',     _C_PRIMARY, 15), '  PostGIS')
         self.tabs.addTab(t_docs, _icon('book-open',    _C_PRIMARY, 15), '  Aide')
-        body.addWidget(self.tabs)
+        # Facteur 1 : l'espace disponible va aux onglets. Sans lui, Qt le
+        # partage avec le bloc du journal, dont la hauteur est plafonnee :
+        # celui-ci ne grandit pas mais ecarte son en-tete de sa console,
+        # laissant un grand vide au milieu de la fenetre.
+        body.addWidget(self.tabs, 1)
 
         # Log console
         body.addWidget(self._build_console())
@@ -1081,6 +1085,10 @@ class LizpackDialog(QDialog):
             '}'
         )
         pile.addWidget(self.log)
+        # Le bloc se contente de la hauteur de son contenu : sans cela il
+        # recoit une part de l'espace libre et ecarte ses elements.
+        bloc.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Maximum)
 
         # Replie par defaut : la place profite a la liste des fichiers. Une
         # erreur le deploie d'elle-meme, l'information n'est donc pas perdue.
