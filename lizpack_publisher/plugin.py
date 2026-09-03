@@ -33,7 +33,7 @@ def _lizpack_icon():
         renderer = QSvgRenderer(svg_path)
         if renderer.isValid():
             pm = QPixmap(64, 64)
-            pm.fill(Qt.transparent)
+            pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm)
             renderer.render(p)
             p.end()

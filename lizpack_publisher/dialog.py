@@ -224,7 +224,7 @@ def _icon(name: str, color: str = '#4a5568', size: int = 16) -> QIcon:
     if not renderer.isValid():
         return QIcon()
     pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     p  = QPainter(pm)
     renderer.render(p)
     p.end()
@@ -256,7 +256,7 @@ def _icone_fichier(name: str, color: str, size: int = 14) -> str:
             if not renderer.isValid():
                 return ''
             pm = QPixmap(size, size)
-            pm.fill(Qt.transparent)
+            pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm)
             renderer.render(p)
             p.end()
@@ -285,11 +285,11 @@ def _letter_icon(letter: str, bg: str, size: int = 20) -> QIcon:
     """Badge carré avec la première lettre en blanc — fiable sur toutes plateformes."""
     from qgis.PyQt.QtGui import QColor, QFont, QBrush, QPen
     pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     p  = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setBrush(QBrush(QColor(bg)))
-    p.setPen(QPen(Qt.NoPen))
+    p.setPen(QPen(Qt.PenStyle.NoPen))
     radius = size * 0.22
     p.drawRoundedRect(0, 0, size, size, radius, radius)
     p.setPen(QColor('white'))
@@ -297,7 +297,7 @@ def _letter_icon(letter: str, bg: str, size: int = 20) -> QIcon:
     f.setPixelSize(max(8, int(size * 0.56)))
     f.setBold(True)
     p.setFont(f)
-    p.drawText(pm.rect(), Qt.AlignCenter, (letter or '?')[0].upper())
+    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, (letter or '?')[0].upper())
     p.end()
     return QIcon(pm)
 
@@ -661,7 +661,7 @@ class LizpackDialog(QDialog):
 
         self.setWindowTitle('LIZPACK Publisher')
         self.setMinimumSize(640, 720)
-        self.setWindowFlags(Qt.Window)
+        self.setWindowFlags(Qt.WindowType.Window)
         self.setStyleSheet(_QSS)
         self._build_ui()
         self._restaurer_geometrie()
@@ -938,7 +938,7 @@ class LizpackDialog(QDialog):
         # Avec une feuille de style, Qt calcule mal la largeur d'un onglet
         # portant une icone et rogne le libelle (« Connexior »). On lui
         # interdit de couper le texte et de repartir la largeur.
-        self.tabs.tabBar().setElideMode(Qt.ElideNone)
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.tabBar().setExpanding(False)
         # Qt calcule la largeur d'un onglet avec la police du widget, mais la
         # feuille de style le peint en 14 px et en gras quand il est actif :
@@ -1054,7 +1054,7 @@ class LizpackDialog(QDialog):
         pile.setSpacing(4)
 
         self.btn_journal = QPushButton()
-        self.btn_journal.setCursor(Qt.PointingHandCursor)
+        self.btn_journal.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_journal.setStyleSheet(
             'QPushButton {'
             f'  color: {_C_MUTED}; background: transparent; border: none;'
@@ -1113,7 +1113,7 @@ class LizpackDialog(QDialog):
         tab         = QWidget()
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setStyleSheet('QScrollArea { background: transparent; border: none; }')
 
         inner = QWidget()
@@ -1135,7 +1135,7 @@ class LizpackDialog(QDialog):
                 f'letter-spacing: 0.5px; text-transform: uppercase; background: transparent;'
             )
             sep = QFrame()
-            sep.setFrameShape(QFrame.HLine)
+            sep.setFrameShape(QFrame.Shape.HLine)
             sep.setStyleSheet(f'color: {_C_BORDER};')
             row.addWidget(ico)
             row.addWidget(lbl)
@@ -1152,7 +1152,7 @@ class LizpackDialog(QDialog):
 
             badge = QLabel(str(num))
             badge.setFixedSize(26, 26)
-            badge.setAlignment(Qt.AlignCenter)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             badge.setStyleSheet(
                 f'background: {_C_PRIMARY}; color: white; border-radius: 13px;'
                 f'font-size: 13px; font-weight: 700;'
@@ -1168,7 +1168,7 @@ class LizpackDialog(QDialog):
             txt.addWidget(t)
             txt.addWidget(d)
 
-            row.addWidget(badge, 0, Qt.AlignTop)
+            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
             row.addLayout(txt, 1)
             w = QWidget()
             w.setContentsMargins(0, 0, 0, 0)
@@ -1197,7 +1197,7 @@ class LizpackDialog(QDialog):
             lbl = QLabel(text)
             lbl.setStyleSheet(f'font-size: 12px; color: {fg}; background: transparent;')
             lbl.setWordWrap(True)
-            row.addWidget(ico, 0, Qt.AlignTop)
+            row.addWidget(ico, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(lbl, 1)
             return f
 
@@ -1321,7 +1321,7 @@ class LizpackDialog(QDialog):
         # ══════════════════════════════════════════════════════════════
         v.addSpacing(4)
         sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f'color: {_C_BORDER};')
         v.addWidget(sep2)
 
@@ -1339,7 +1339,7 @@ class LizpackDialog(QDialog):
 
         footer = QLabel('LIZPACK Publisher · Plugin QGIS')
         footer.setStyleSheet(f'font-size: 12px; color: {_C_FAINT}; padding: 2px 0;')
-        footer.setAlignment(Qt.AlignCenter)
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(footer)
 
         scroll_area.setWidget(inner)
@@ -1359,7 +1359,7 @@ class LizpackDialog(QDialog):
         grp1 = QGroupBox('Étape 1 — Identifiants')
         f1   = QFormLayout(grp1)
         f1.setSpacing(12)
-        f1.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self.txt_email = _input_with_icon('votre@email.com')
         self.txt_pwd   = _input_with_icon('••••••••', password=True)
@@ -1395,7 +1395,7 @@ class LizpackDialog(QDialog):
         self.grp_instance.setEnabled(False)
         f2 = QFormLayout(self.grp_instance)
         f2.setSpacing(12)
-        f2.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f2.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # Espace de travail : son propre compte, ou celui d'une equipe
         # qui nous a partage des instances. Masque tant qu'aucune equipe
@@ -1473,7 +1473,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             f'color: {_C_MUTED}; font-size: 13px; font-family: monospace;'
             f'padding: 4px 8px; background: {_C_BG_TER}; border-radius: 6px;'
         )
-        self.lbl_path.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.lbl_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         nav.addWidget(self.btn_back)
         nav.addWidget(self.lbl_path)
         v.addWidget(self.barre_nav)
@@ -1499,36 +1499,36 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             f'color: {_C_WARN_TX}; font-size: 13px; background: transparent; '
             'border: none;'
         )
-        fi_h.addWidget(fi_ico, 0, Qt.AlignTop)
+        fi_h.addWidget(fi_ico, 0, Qt.AlignmentFlag.AlignTop)
         fi_h.addSpacing(8)
         fi_h.addWidget(self.lbl_fichiers_interdits, 1)
         self.fichiers_interdits.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Maximum,
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
         )
         self.fichiers_interdits.setVisible(False)
         v.addWidget(self.fichiers_interdits)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(['Fichier', 'Taille', 'Modifié'])
-        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.header().resizeSection(1, 80)
         self.tree.header().resizeSection(2, 90)
-        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setAlternatingRowColors(True)
         self.tree.itemDoubleClicked.connect(self._on_file_dblclick)
         self.tree.itemClicked.connect(self._on_file_click)
         self.tree.itemSelectionChanged.connect(self._sync_open_button)
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         v.addWidget(self.tree)
 
         # Raccourcis clavier sur l'arbre
         from qgis.PyQt.QtWidgets import QShortcut
         from qgis.PyQt.QtGui import QKeySequence
-        QShortcut(QKeySequence.Copy,  self.tree, self._do_copy)
+        QShortcut(QKeySequence.StandardKey.Copy,  self.tree, self._do_copy)
         QShortcut(QKeySequence('Ctrl+X'), self.tree, self._do_cut)
-        QShortcut(QKeySequence.Paste, self.tree, self._do_paste)
-        QShortcut(QKeySequence.Delete, self.tree, self._do_delete_selected)
+        QShortcut(QKeySequence.StandardKey.Paste, self.tree, self._do_paste)
+        QShortcut(QKeySequence.StandardKey.Delete, self.tree, self._do_delete_selected)
 
         # ── Barre d'actions fichiers ─────────────────────────────────
         self.barre_actions = QWidget()
@@ -1613,7 +1613,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self.lbl_local_project.setStyleSheet(
             f'font-size: 13px; color: {_C_TEXT}; font-style: italic;'
         )
-        self.lbl_local_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.lbl_local_project.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         row_local.addWidget(lbl_l)
         row_local.addWidget(self.lbl_local_project, 1)
         pub_v.addLayout(row_local)
@@ -1657,7 +1657,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         grp = QGroupBox('Uploader un dossier vers l\'instance')
         f   = QFormLayout(grp)
         f.setSpacing(12)
-        f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         local_row = QHBoxLayout()
         local_row.setSpacing(6)
@@ -1704,7 +1704,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet('QScrollArea { background: transparent; border: none; }')
 
         inner = QWidget()
@@ -1736,7 +1736,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             f'color: {_C_INFO_TX}; font-size: 13px; background: transparent; '
             'border: none;'
         )
-        info_h.addWidget(info_ico, 0, Qt.AlignTop)
+        info_h.addWidget(info_ico, 0, Qt.AlignmentFlag.AlignTop)
         info_h.addSpacing(8)
         info_h.addWidget(info_lbl)
         v.addWidget(info_frame)
@@ -1764,7 +1764,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         pu_lbl.setStyleSheet(
             f'color: {_C_WARN_TX}; font-size: 13px; background: transparent;'
         )
-        pu_h.addWidget(pu_ico, 0, Qt.AlignTop)
+        pu_h.addWidget(pu_ico, 0, Qt.AlignmentFlag.AlignTop)
         pu_h.addSpacing(8)
         pu_h.addWidget(pu_lbl)
         self.pg_unavailable.setVisible(False)
@@ -1772,10 +1772,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         self.lst_pg = QTreeWidget()
         self.lst_pg.setHeaderLabels(['Table', 'Schéma', 'Géométrie', 'SRID'])
-        self.lst_pg.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.lst_pg.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.lst_pg.setAlternatingRowColors(True)
         self.lst_pg.setMinimumHeight(150)
-        self.lst_pg.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.lst_pg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.lst_pg.itemSelectionChanged.connect(self._sync_pg_buttons)
         self.lst_pg.itemDoubleClicked.connect(
             lambda item, _: self._add_postgis_layer(item)
@@ -1783,7 +1783,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         # Les trois sections vont dans un separateur : leurs hauteurs
         # respectives dependent de ce qu'on regarde — la liste des tables,
         # le diagnostic, ou l'import — et l'utilisateur seul le sait.
-        self.sections_pg = QSplitter(Qt.Vertical)
+        self.sections_pg = QSplitter(Qt.Orientation.Vertical)
         self.sections_pg.setChildrenCollapsible(False)
         self.sections_pg.setHandleWidth(8)
 
@@ -1833,12 +1833,12 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         # Les trois premieres colonnes s'ajustent a leur contenu, sans quoi
         # « Index spatial manquant » s'affichait « Index spatia… ».
         for colonne in (0, 1, 2):
-            entete.setSectionResizeMode(colonne, QHeaderView.ResizeToContents)
-        entete.setSectionResizeMode(3, QHeaderView.Stretch)
+            entete.setSectionResizeMode(colonne, QHeaderView.ResizeMode.ResizeToContents)
+        entete.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.lst_sante.setAlternatingRowColors(True)
         self.lst_sante.setMinimumHeight(140)
         self.lst_sante.setRootIsDecorated(False)
-        self.lst_sante.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.lst_sante.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.lst_sante.itemSelectionChanged.connect(self._sync_optim_buttons)
         sante_v.addWidget(self.lst_sante, 1)
 
@@ -1881,7 +1881,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         layer_row.setSpacing(6)
         self.cmb_import_layer = QComboBox()
         self.cmb_import_layer.setView(QListView())
-        self.cmb_import_layer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.cmb_import_layer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.cmb_import_layer.setMinimumWidth(0)
         self.cmb_import_layer.currentIndexChanged.connect(self._on_import_layer_changed)
         btn_refresh_layers = QPushButton()
@@ -1929,7 +1929,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         # Bouton import (dans le GroupBox, pleine largeur)
         self.btn_import_pg = _btn('Importer dans PostGIS', 'upload', 'white', _BTN_PRIMARY)
         self.btn_import_pg.setEnabled(False)
-        self.btn_import_pg.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.btn_import_pg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.btn_import_pg.setToolTip(
             'Envoyer la couche sélectionnée dans la base PostGIS de l\'instance'
         )
@@ -2368,8 +2368,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if not item:
             self._log('Sélectionnez un fichier dans la liste.', 'warn')
             return
-        api_path = item.data(0, Qt.UserRole)
-        file_id  = item.data(0, Qt.UserRole + 1)
+        api_path = item.data(0, Qt.ItemDataRole.UserRole)
+        file_id  = item.data(0, Qt.ItemDataRole.UserRole + 1)
         if not api_path or not api_path.lower().endswith(('.qgz', '.qgs')):
             self._log('Sélectionnez un fichier .qgz ou .qgs.', 'warn')
             return
@@ -2384,9 +2384,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 "Ce projet est à la racine de l'instance.\n"
                 'Ouvrir revient à télécharger tout son contenu.\n\n'
                 'Continuer ?',
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
             )
-            if rep != QMessageBox.Yes:
+            if rep != QMessageBox.StandardButton.Yes:
                 self._log('Ouverture annulée.', 'warn')
                 return
 
@@ -2424,7 +2424,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._sync_open_button()
         self._log(f'Téléchargé → {local_path}', 'ok')
         item = self.tree.currentItem()
-        self._open_project_api_path = item.data(0, Qt.UserRole) if item else None
+        self._open_project_api_path = item.data(0, Qt.ItemDataRole.UserRole) if item else None
         ok = QgsProject.instance().read(local_path)
         if ok:
             fname = os.path.basename(local_path)
@@ -2574,8 +2574,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         message dans la console.
         """
         item = self.tree.currentItem()
-        chemin = item.data(0, Qt.UserRole) if item else None
-        dossier = item.data(0, Qt.UserRole + 2) if item else False
+        chemin = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        dossier = item.data(0, Qt.ItemDataRole.UserRole + 2) if item else False
         projet = bool(
             chemin and not dossier and chemin.lower().endswith(('.qgs', '.qgz'))
         ) and not self._lecture_seule
@@ -2587,14 +2587,14 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _on_file_click(self, item, _col):
         """Clic simple : pré-remplir le champ Destination dans la section Publication."""
-        api_path = item.data(0, Qt.UserRole)
-        is_dir   = item.data(0, Qt.UserRole + 2)
+        api_path = item.data(0, Qt.ItemDataRole.UserRole)
+        is_dir   = item.data(0, Qt.ItemDataRole.UserRole + 2)
         if api_path and not is_dir:
             self.txt_publish_dest.setText(api_path)
 
     def _on_file_dblclick(self, item, _col):
-        api_path = item.data(0, Qt.UserRole)
-        is_dir   = item.data(0, Qt.UserRole + 2)
+        api_path = item.data(0, Qt.ItemDataRole.UserRole)
+        is_dir   = item.data(0, Qt.ItemDataRole.UserRole + 2)
         if is_dir:
             self._path_history.append(self._current_path)
             self._current_path = api_path
@@ -2614,9 +2614,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         menu  = QMenu(self)
 
         if items:
-            is_dir  = items[0].data(0, Qt.UserRole + 2)
+            is_dir  = items[0].data(0, Qt.ItemDataRole.UserRole + 2)
             is_proj = (not is_dir and
-                       (items[0].data(0, Qt.UserRole) or '').lower().endswith(('.qgs', '.qgz')))
+                       (items[0].data(0, Qt.ItemDataRole.UserRole) or '').lower().endswith(('.qgs', '.qgz')))
 
             if is_proj and len(items) == 1:
                 act_open = menu.addAction(_icon('download', 'white', 14), 'Ouvrir dans QGIS')
@@ -2657,14 +2657,16 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         act_up_dir = menu.addAction(_icon('folder-upload', _C_PRIMARY, 14), 'Uploader un dossier ici')
         act_up_dir.triggered.connect(self._do_upload_folder_here)
 
-        menu.exec_(self.tree.viewport().mapToGlobal(pos))
+        # exec() et non exec_() : Qt6 supprime l'alias historique, ajoute
+        # en Python 2 quand « exec » etait un mot reserve.
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _selected_ids(self):
         """Retourne la liste des IDs des items sélectionnés."""
         return [
-            item.data(0, Qt.UserRole + 1)
+            item.data(0, Qt.ItemDataRole.UserRole + 1)
             for item in self.tree.selectedItems()
-            if item.data(0, Qt.UserRole + 1) is not None
+            if item.data(0, Qt.ItemDataRole.UserRole + 1) is not None
         ]
 
     # ── Copier / Couper / Coller ──────────────────────────────────────
@@ -2752,9 +2754,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         rep = QMessageBox.question(
             self, 'Confirmer la suppression',
             f'Supprimer {len(ids)} élément(s) ?\n{preview}',
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if rep != QMessageBox.Yes:
+        if rep != QMessageBox.StandardButton.Yes:
             return
         self._start_loading(f'Suppression de {len(ids)} élément(s)…')
         self._del_worker = DeleteWorker(self.session, ids)
@@ -2771,7 +2773,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             self._log('Sélectionnez un seul élément pour le renommer.', 'warn')
             return
         item    = items[0]
-        file_id = item.data(0, Qt.UserRole + 1)
+        file_id = item.data(0, Qt.ItemDataRole.UserRole + 1)
         old     = item.text(0)
         new_name, ok = QInputDialog.getText(self, 'Renommer', 'Nouveau nom :', text=old)
         if not ok or not new_name.strip() or new_name.strip() == old:
@@ -3010,7 +3012,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 continue
             item = QTreeWidgetItem([table, schema, geom_col or '—', str(srid)])
             item.setIcon(0, db_ico)
-            item.setData(0, Qt.UserRole, {
+            item.setData(0, Qt.ItemDataRole.UserRole, {
                 **pg, 'table': table, 'schema': schema,
                 # Chaine vide = table non spatiale : QGIS la chargera en
                 # table attributaire. Y mettre 'geom' par defaut inventerait
@@ -3069,7 +3071,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                     str(t.crs().postgisSrid()) if t.crs().isValid() else '—',
                 ])
                 item.setIcon(0, db_ico)
-                item.setData(0, Qt.UserRole, {
+                item.setData(0, Qt.ItemDataRole.UserRole, {
                     **pg, 'table': t.tableName(),
                     'schema': t.schema() or 'public',
                     'geom_col': t.geometryColumnName() or '',
@@ -3092,7 +3094,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if not item:
             self._log('Sélectionnez une table.', 'warn')
             return
-        info = item.data(0, Qt.UserRole)
+        info = item.data(0, Qt.ItemDataRole.UserRole)
         if not info:
             return
         uri = QgsDataSourceUri()
@@ -3236,7 +3238,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 infobulle += f'\n\nPour défaire :\n{probleme.annulation}'
             for colonne in range(4):
                 item.setToolTip(colonne, infobulle)
-            item.setData(0, Qt.UserRole, probleme)
+            item.setData(0, Qt.ItemDataRole.UserRole, probleme)
             self.lst_sante.addTopLevelItem(item)
 
         auto = [p for p in problemes if p.automatique]
@@ -3259,7 +3261,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         """Les problèmes des lignes sélectionnées, corrigeables seulement."""
         retenus = []
         for item in self.lst_sante.selectedItems():
-            probleme = item.data(0, Qt.UserRole)
+            probleme = item.data(0, Qt.ItemDataRole.UserRole)
             if probleme is not None and probleme.applicable:
                 retenus.append(probleme)
         return retenus
@@ -3378,9 +3380,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                   'données.\n\nContinuer ?')
         reponse = QMessageBox.question(
             self, 'Optimiser la base ?', texte,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
         )
-        if reponse != QMessageBox.Yes:
+        if reponse != QMessageBox.StandardButton.Yes:
             self._log('Optimisation annulée.', 'warn')
             return
 
@@ -3596,9 +3598,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
             item = QTreeWidgetItem([name, size_str, date_str])
             item.setIcon(0, ico)
-            item.setData(0, Qt.UserRole,     api_path)
-            item.setData(0, Qt.UserRole + 1, f.get('id'))
-            item.setData(0, Qt.UserRole + 2, is_dir)
+            item.setData(0, Qt.ItemDataRole.UserRole,     api_path)
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, f.get('id'))
+            item.setData(0, Qt.ItemDataRole.UserRole + 2, is_dir)
             self.tree.addTopLevelItem(item)
 
         self._sync_open_button()
@@ -3710,5 +3712,5 @@ def _input_with_icon(placeholder: str,
     w = QLineEdit()
     w.setPlaceholderText(placeholder)
     if password:
-        w.setEchoMode(QLineEdit.Password)
+        w.setEchoMode(QLineEdit.EchoMode.Password)
     return w

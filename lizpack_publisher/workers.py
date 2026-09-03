@@ -856,7 +856,7 @@ class ImportToPostGISWorker(QThread):
                 False,
             )
 
-            if error != QgsVectorLayerExporter.NoError:
+            if error != QgsVectorLayerExporter.ExportError.NoError:
                 raise Exception(msg or f'Erreur export (code {error})')
 
             self.finished.emit()
