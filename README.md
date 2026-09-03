@@ -1,50 +1,169 @@
-# LizPack Publisher
+# LIZPACK Publisher — Plugin QGIS
 
-A QGIS plugin to publish and manage your projects directly from your [LizPack](https://lizpack.com) instance.
+Gérer les projets et les données d'une instance LIZPACK sans quitter QGIS :
+parcourir les fichiers, ouvrir un projet avec toutes ses données, publier vers
+Lizmap, et diagnostiquer la base PostGIS.
 
-## Features
+---
 
-- **Authentication** — Secure JWT-based login to the LizPack API
-- **Multi-instance support** — Select from your available LizPack instances
-- **File explorer** — Browse, create folders, rename, copy, move and delete remote files
-- **Upload** — Send individual files or entire folders (batched in a single HTTP request)
-- **Project download** — Fetch a `.qgs`/`.qgz` project along with its dependencies (shapefiles, rasters, GeoJSON, QML...)
-- **Publishing** — Automatic rewriting of PostGIS connections to target the instance's internal database
-- **PostGIS import** — Import QGIS vector layers into the instance's PostGIS database
-- **Non-blocking operations** — All network operations run in dedicated QThreads
+## Fonctionnalités
 
-## Requirements
+### Connexion
 
-- QGIS >= 3.16
-- A [LizPack](https://lizpack.com) account with at least one active instance
+- **Authentification JWT** (email + mot de passe), puis choix de l'instance.
+- **Identifiants mémorisés** en option. L'email va dans les réglages QGIS, le
+  mot de passe dans le **magasin d'authentification** de QGIS, qui le chiffre.
+  Il n'est jamais écrit en clair.
+- **Espaces partagés** : si une équipe vous a partagé ses instances, un choix
+  « Espace » apparaît. Le plugin transmet le contexte au serveur, qui vérifie
+  l'adhésion et décide. Sans le droit de gestion des fichiers, l'onglet Projets
+  affiche la raison au lieu d'un arbre vide.
+
+### Projets
+
+- **Ouvrir un projet `.qgs`/`.qgz`** avec l'intégralité de son dossier serveur,
+  sous-dossiers compris — le serveur assemble une archive, une seule requête.
+- **Destination au choix**, mémorisée d'une fois sur l'autre.
+- **Publier** le projet QGIS actif. Les connexions PostGIS du `.qgs` sont
+  réécrites vers l'adresse interne de l'instance, le `.qgs.cfg` et les données
+  locales référencées partent dans le même envoi.
+- Créer, envoyer, renommer, supprimer, copier, déplacer.
+
+### PostGIS
+
+- **Lister les tables** et les ajouter comme couches. La connexion est
+  enregistrée dans QGIS automatiquement.
+- **Importer** une couche QGIS vers la base de l'instance.
+- **Diagnostiquer la base** — analyse en lecture seule qui relève :
+  - colonne géométrique sans index GIST ;
+  - table sans clef primaire entière, avec recherche d'une colonne existante
+    réutilisable plutôt qu'une colonne ajoutée ;
+  - clef primaire en `bigint`, que QGIS Serveur refuse ;
+  - statistiques absentes ou périmées ;
+  - polygones de plus de 10 000 sommets ;
+  - lignes mortes accumulées ;
+  - noms de table bordés d'espaces.
+
+  Les tables de service — schéma `lizmap`, `spatial_ref_sys`, `layer_styles` —
+  sont écartées.
+
+- **Optimiser**, sur la totalité ou sur une sélection. Trois régimes :
+
+  | Correction | Comportement |
+  |---|---|
+  | Automatique | index, `ANALYZE`, `VACUUM` — réversible, appliqué par « Tout optimiser » |
+  | Sur confirmation | clef primaire, conversion de type — jamais par « Tout optimiser » |
+  | À la main | renommage, `ST_Subdivide` — le SQL est donné, jamais exécuté |
+
+  Chaque correction appliquée affiche sa commande d'annulation dans le journal.
+
+- **Exporter** le diagnostic en CSV (rapport) ou en SQL (script rejouable, les
+  corrections manuelles commentées).
+
+### Interface
+
+- Fenêtre redimensionnable, taille et position retenues.
+- Sections de l'onglet PostGIS séparées par des poignées mobiles.
+- Journal repliable, déployé automatiquement en cas d'erreur.
+
+---
 
 ## Installation
 
-1. Clone or download this repository into your QGIS plugins folder:
-   - **Windows**: `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\lizpack_publisher`
-   - **Linux**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/lizpack_publisher`
-   - **macOS**: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/lizpack_publisher`
-2. Restart QGIS
-3. Enable the plugin via **Plugins > Manage and Install Plugins**
+### Copier le plugin dans QGIS
 
-## Usage
+**Windows** — double-cliquer sur `install_plugin.bat`.
 
-1. Click the **LizPack Publisher** icon in the Web toolbar (or menu **Web > LizPack**)
-2. Log in with your LizPack credentials
-3. Select an instance
-4. Browse files, upload projects or import PostGIS layers
+**Manuellement** — copier le dossier `lizpack_publisher/` dans :
 
-## Project structure
+```
+%APPDATA%\QGIS\QGIS3\profiles\<profil>\python\plugins\
+```
 
-| File | Description |
-|---|---|
-| `__init__.py` | QGIS entry point (`classFactory`) |
-| `plugin.py` | Main plugin class, menu and toolbar management |
-| `dialog.py` | User interface (QDialog) |
-| `sftp_client.py` | HTTP client for the LizPack API (auth, files, PostGIS) |
-| `workers.py` | QThreads for async operations (upload, download, import...) |
-| `metadata.txt` | QGIS plugin metadata |
+### Activer
 
-## License
+Extensions → Gérer les extensions → **LizPack Publisher** → cocher.
 
-LizPack / GEODONNEE INC
+L'entrée apparaît alors dans **Internet ▸ LizPack ▸ LizPack Publisher**
+— « Internet » est le nom français du menu *Web*.
+
+---
+
+## Changer d'environnement
+
+Le serveur interrogé est fixé par une constante dans
+`lizpack_publisher/api_client.py` :
+
+```python
+# ACCEPT : https://acceptapi.lizpack.com
+# PROD   : https://api.lizpack.com
+API_BASE = 'https://api.lizpack.com'
+```
+
+L'adresse de la documentation, elle, est dans `dialog.py`, méthode `_tab_docs()` :
+
+```python
+_SUPPORT_URL = 'https://lizpack.com/client/aide-support'
+```
+
+Les deux doivent être changées ensemble.
+
+---
+
+## Structure
+
+```
+plugin/
+├── lizpack_publisher/
+│   ├── __init__.py        — fabrique QGIS
+│   ├── plugin.py          — point d'entrée, menu et barre d'outils
+│   ├── dialog.py          — interface, cinq onglets
+│   ├── api_client.py      — client HTTP de l'API (contient API_BASE)
+│   ├── workers.py         — QThreads non bloquants
+│   ├── optimisation.py    — diagnostic et corrections PostGIS
+│   ├── .flake8            — configuration du linter, livrée dans le zip
+│   ├── icon.png / icon.svg
+│   └── metadata.txt
+└── install_plugin.bat
+```
+
+Le fichier `.flake8` doit rester **dans** `lizpack_publisher/` : c'est ce
+dossier seul qui est empaqueté pour le dépôt QGIS, et donc le seul endroit où
+le validateur le lira.
+
+---
+
+## Dépendances
+
+| Bibliothèque | Fournie avec QGIS | Usage |
+|---|---|---|
+| `http.client`, `zipfile`, `csv` | oui (stdlib) | API, archives, export |
+| `xml.etree` + `xml.parsers.expat` | oui (stdlib) | lecture des `.qgs` |
+| `PyQt5` | oui | interface |
+| `psycopg2` | **généralement** | onglet PostGIS et diagnostic |
+
+`psycopg2` accompagne la plupart des installations QGIS. En son absence, la
+liste des tables passe par le fournisseur QGIS, mais **le diagnostic de la base
+n'est pas disponible** et le dit.
+
+Le plugin n'installe aucun paquet et n'en réclame aucun.
+
+---
+
+## Notes techniques
+
+**Analyse XML.** Les `.qgs` sont lus par `parse_qgs_xml()`, qui utilise
+`defusedxml` s'il est présent et sinon un parseur expat durci : les
+déclarations d'entités sont refusées, ce qui bloque les entités externes et les
+bombes d'expansion. La DOCTYPE reste acceptée — QGIS en écrit une dans chaque
+projet.
+
+**Fils d'exécution.** Chaque opération réseau tourne dans un `QThread` suivi par
+`_suivre()`. Sans cette référence, un fil écrasé en pleine course était détruit
+par Python et Qt abandonnait le processus : QGIS se fermait sans trace. À la
+fermeture de la fenêtre, les fils encore actifs sont débranchés et confiés au
+module plutôt que détruits.
+
+**Identifiants SQL.** Tout nom venant du catalogue passe par `citer()`, qui
+double les guillemets internes. Un nom de table forgé ne peut pas rompre la
+citation.

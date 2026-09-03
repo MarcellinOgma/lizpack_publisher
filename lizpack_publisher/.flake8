@@ -1,0 +1,25 @@
+# Linter du plugin QGIS LizPack Publisher.
+#
+# Ce fichier doit rester DANS lizpack_publisher/ : c'est ce dossier seul
+# qui est empaquete dans le zip envoye au depot QGIS, et donc le seul
+# endroit ou le validateur du depot verra la configuration.
+#
+# Regles desactivees volontairement — choix de style assumes du plugin :
+#   E221/E222/E241  alignement des affectations et des dicts en colonnes
+#                   (self.local_path  = ... / self.server_path = ...)
+#   E126/E128/E131  continuations en retrait suspendu dans les appels
+#                   multi-lignes de construction d'interface
+#   W503/W504       coupure avant/apres operateur binaire (regles mutuellement
+#                   contradictoires dans pycodestyle)
+[flake8]
+extend-ignore =
+    E126,
+    E128,
+    E131,
+    E221,
+    E222,
+    E241,
+    W503,
+    W504
+max-line-length = 120
+exclude = .git,__pycache__
