@@ -14,9 +14,6 @@ import datetime
 import http.client
 import ssl
 from urllib.parse import urlparse, urlencode
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 
 from qgis.PyQt.QtCore import QSettings
 
@@ -41,6 +38,12 @@ class LizpackSession:
         self._instance_id   = None
         self._instance_name = ''
         self._conn           = None   # connexion HTTP persistante
+        self.metadata_error  = ''     # dernier echec de lecture des metadonnees
+        # Contexte d'equipe : l'identifiant du proprietaire dont on
+        # consulte les instances. None = son propre compte.
+        self._team_owner_id  = None
+        self.memberships     = []     # equipes dont on est membre
+        self.permissions     = {}     # ce que le serveur nous autorise
 
     @property
     def api_base(self):
@@ -76,6 +79,7 @@ class LizpackSession:
         Retourne : [{'id': ..., 'name': ..., 'status': ...}, ...]
         """
         self._token = self._get_jwt(email, password)
+        self.get_memberships()
         return self._get_instances()
 
     # ──────────────────────────────────────────────────────────────────
@@ -93,18 +97,36 @@ class LizpackSession:
         # Valider l'accès en listant les fichiers (déclenche config SFTP auto côté serveur)
         self._api('GET', f'/api/instances/{instance_id}/files/', params={'path': '/'})
 
-        # Récupérer les métadonnées (PostGIS) — best effort, pas bloquant
+        # Récupérer les métadonnées (PostGIS) — best effort, pas bloquant.
+        # L'echec n'empeche pas de travailler sur les fichiers, mais il prive
+        # l'onglet PostGIS de ses identifiants ET la publication de sa
+        # reecriture des connexions. Il doit donc se voir, pas disparaitre.
+        self.metadata_error = ''
         try:
             self._instance_data = self._api('GET', f'/api/infra/lizpack/{instance_id}')
-        except Exception:
+        except Exception as e:
             self._instance_data = {}
+            self.metadata_error = str(e)
 
     def logout(self):
         self._close_conn()
+        self._team_owner_id = None
+        self.memberships    = []
+        self.permissions    = {}
         self._token         = ''
         self._instance_data = {}
         self._instance_id   = None
         self._instance_name = ''
+
+    def peut(self, quoi, defaut=True):
+        """Le serveur nous autorise-t-il cette action ?
+
+        En l'absence de reponse — serveur plus ancien, compte personnel —
+        on ne bride rien : c'est le serveur qui tranche, pas le plugin.
+        """
+        if not self.permissions:
+            return defaut
+        return bool(self.permissions.get(quoi, defaut))
 
     def is_authenticated(self):
         """JWT obtenu."""
@@ -168,6 +190,22 @@ class LizpackSession:
         return self._api_raw(
             'GET',
             f'/api/instances/{self._instance_id}/files/{file_id}/download/',
+        )
+
+    def download_folder_zip(self, ids, zip_name='projet.zip'):
+        """Recupere plusieurs fichiers ou dossiers en une seule archive.
+
+        Le serveur parcourt lui-meme les sous-dossiers et applique aux
+        projets la meme restauration que sur un telechargement unitaire.
+        Retourne les octets du zip.
+        """
+        data = json.dumps({'ids': ids, 'zip_name': zip_name}).encode()
+        return self._request(
+            'POST',
+            f'/api/instances/{self._instance_id}/files/create_zip/',
+            body=data,
+            extra_headers={'Content-Type': 'application/json', 'Accept': '*/*'},
+            raw=True,
         )
 
     def _list_files_cached(self, parent_path):
@@ -446,12 +484,41 @@ class LizpackSession:
         return resp['access']
 
     def _get_instances(self):
-        resp      = self._api('GET', '/api/infra/my-instances/')
-        instances = (resp if isinstance(resp, list)
-                     else resp.get('instances', resp.get('results', [])))
-        return instances
+        resp = self._api('GET', '/api/infra/my-instances/')
+        if isinstance(resp, list):
+            self.permissions = {}
+            return resp
+        # Le serveur dit avec la liste ce qu'il nous autorise a faire. Ne
+        # pas le lire revenait a proposer des actions qu'il refusera.
+        self.permissions = resp.get('permissions', {}) or {}
+        return resp.get('instances', resp.get('results', []))
 
     # ── Transport HTTP (connexion persistante keep-alive) ────────────
+
+    @property
+    def team_owner_id(self):
+        return self._team_owner_id
+
+    def set_team_context(self, owner_id):
+        """Bascule vers l'espace d'un autre proprietaire, ou revient au sien.
+
+        Le serveur lit l'en-tete X-Team-Owner et verifie l'adhesion : le
+        plugin n'accorde rien de lui-meme, il demande.
+        """
+        self._team_owner_id = owner_id
+        self._instance_data = {}
+        self.clear_cache()
+
+    def get_memberships(self):
+        """Les equipes dont l'utilisateur est membre actif."""
+        try:
+            resp = self._api('GET', '/api/team/memberships/')
+        except Exception:
+            # Un serveur plus ancien n'expose pas cet endpoint : on reste
+            # simplement sur son propre compte.
+            return []
+        self.memberships = (resp or {}).get('memberships', []) or []
+        return self.memberships
 
     def _base_headers(self):
         return {
@@ -462,10 +529,16 @@ class LizpackSession:
             'Connection':    'keep-alive',
         }
 
+    def _base_headers_avec_equipe(self):
+        entetes = self._base_headers()
+        if self._team_owner_id:
+            entetes['X-Team-Owner'] = str(self._team_owner_id)
+        return entetes
+
     def _request(self, method, path, body=None, extra_headers=None, raw=False):
         """Requête HTTP via connexion persistante. Reconnecte auto si coupée."""
         conn = self._get_conn()
-        hdrs = self._base_headers()
+        hdrs = self._base_headers_avec_equipe()
         if extra_headers:
             hdrs.update(extra_headers)
 
@@ -486,8 +559,8 @@ class LizpackSession:
                     if isinstance(msg, dict):
                         msg = str(msg)
                 except Exception:
-                    lines = [l.strip() for l in data.decode(errors='replace').splitlines()
-                             if l.strip() and not l.strip().startswith('<')]
+                    lines = [ln.strip() for ln in data.decode(errors='replace').splitlines()
+                             if ln.strip() and not ln.strip().startswith('<')]
                     msg = lines[0] if lines else f'HTTP {resp.status}'
                 raise Exception(f'API {resp.status} : {msg}')
 
@@ -535,7 +608,7 @@ class LizpackSession:
                 body += content
                 body += b'\r\n'
                 body += f'--{boundary}\r\n'.encode()
-                body += f'Content-Disposition: form-data; name="paths"\r\n\r\n'.encode()
+                body += b'Content-Disposition: form-data; name="paths"\r\n\r\n'
                 body += f'{rel_path}\r\n'.encode()
         else:
             for key, (filename, content) in files.items():

@@ -6,8 +6,8 @@ Point d'entrée du plugin QGIS LizPack Publisher v2.
 import os
 
 from qgis.PyQt.QtWidgets import QAction
-from qgis.PyQt.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QFontMetrics
-from qgis.PyQt.QtCore import Qt, QRectF
+from qgis.PyQt.QtGui import QIcon, QPixmap, QPainter
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtSvg import QSvgRenderer
 
 
@@ -53,7 +53,18 @@ class LizpackPublisherPlugin:
         self.iface.removePluginWebMenu('LizPack', self.action)
         self.iface.removeWebToolBarIcon(self.action)
         if self.dialog:
+            # close() met les fils encore actifs a l'abri (voir closeEvent) et
+            # debranche le signal de projet : sans cela QGIS appellerait une
+            # methode d'une fenetre detruite au prochain projet ouvert.
             self.dialog.close()
+            self.dialog.detacher_de_qgis()
+            # close() ne fait que masquer : la fenetre reste rattachee a la
+            # fenetre principale de QGIS et survit au dechargement. Sans ces
+            # deux lignes, chaque reinstallation ou mise a jour du plugin
+            # laissait derriere elle une fenetre fantome, encore connectee,
+            # que l'utilisateur retrouvait a cote de la nouvelle.
+            self.dialog.setParent(None)
+            self.dialog.deleteLater()
             self.dialog = None
 
     def run(self):
