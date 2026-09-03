@@ -46,4 +46,4 @@ def ignorer(erreur, contexte=''):
     if QgsMessageLog is None:
         return
     message = f'{contexte} : {erreur}' if contexte else str(erreur)
-    QgsMessageLog.logMessage(message, ETIQUETTE, Qgis.Info)
+    QgsMessageLog.logMessage(message, ETIQUETTE, Qgis.MessageLevel.Info)
