@@ -41,6 +41,7 @@ from qgis.core import (
     QgsApplication, QgsAuthMethodConfig, QgsProviderRegistry,
 )
 
+from . import journal
 from .api_client import LizpackSession
 from .workers import (
     LoginWorker, ConnectInstanceWorker, UploadFolderWorker,
@@ -705,8 +706,9 @@ class LizpackDialog(QDialog):
         QSettings().setValue(_REPERTOIRE_CLE, dossier)
         try:
             QgsProject.instance().setPresetHomePath(dossier)
-        except Exception:
-            pass   # QGIS trop ancien : le reste fonctionne quand meme
+        except Exception as e:
+            # QGIS trop ancien : le reste fonctionne quand meme.
+            journal.ignorer(e, 'répertoire de projet QGIS')
         self._log(f'Répertoire de travail : {dossier}')
 
     # ══════════════════════════════════════════════════════════════════
@@ -781,10 +783,10 @@ class LizpackDialog(QDialog):
             config = QgsAuthMethodConfig()
             if gestionnaire.loadAuthenticationConfig(authcfg, config, True):
                 self.txt_pwd.setText(config.config('password', ''))
-        except Exception:
+        except Exception as e:
             # Magasin verrouille ou configuration disparue : sans gravite,
             # l'utilisateur retape son mot de passe.
-            pass
+            journal.ignorer(e, 'lecture du magasin d\'authentification')
 
     def _enregistrer_identifiants(self, email, mot_de_passe):
         """Retient les identifiants apres une authentification reussie."""
@@ -2290,8 +2292,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 pg['host'], str(pg['port']), pg['dbname'], pg['user'], pg['password'],
             )
             meta.saveConnection(meta.createConnection(uri.uri(False), {}), nom)
-        except Exception:
-            pass
+        except Exception as e:
+            # L'explorateur se rafraichira de lui-meme au prochain passage.
+            journal.ignorer(e, 'notification de l\'explorateur QGIS')
 
     def _unregister_qgis_pg_connection(self):
         """Supprime la connexion PostgreSQL enregistrée par le plugin."""

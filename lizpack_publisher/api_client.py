@@ -31,6 +31,8 @@ from urllib.parse import urlparse, urlencode
 
 from qgis.PyQt.QtCore import QSettings
 
+from . import journal
+
 
 # ── Changer cette constante pour passer en production ──────────────────────
 # ACCEPT : https://acceptapi.lizpack.com
@@ -47,7 +49,7 @@ class LizpackSession:
 
     def __init__(self):
         self._s             = QSettings()
-        self._token         = ''
+        self._jeton         = ''
         self._instance_data = {}
         self._instance_id   = None
         self._instance_name = ''
@@ -79,8 +81,8 @@ class LizpackSession:
         if self._conn:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                journal.ignorer(e, 'fermeture de la connexion HTTP')
             self._conn = None
 
     # ──────────────────────────────────────────────────────────────────
@@ -92,7 +94,7 @@ class LizpackSession:
         Obtient le JWT et retourne la liste des instances de l'utilisateur.
         Retourne : [{'id': ..., 'name': ..., 'status': ...}, ...]
         """
-        self._token = self._get_jwt(email, password)
+        self._jeton = self._get_jwt(email, password)
         self.get_memberships()
         return self._get_instances()
 
@@ -127,7 +129,7 @@ class LizpackSession:
         self._team_owner_id = None
         self.memberships    = []
         self.permissions    = {}
-        self._token         = ''
+        self._jeton         = ''
         self._instance_data = {}
         self._instance_id   = None
         self._instance_name = ''
@@ -144,11 +146,11 @@ class LizpackSession:
 
     def is_authenticated(self):
         """JWT obtenu."""
-        return bool(self._token)
+        return bool(self._jeton)
 
     def is_connected(self):
         """JWT + instance sélectionnée."""
-        return bool(self._token and self._instance_id)
+        return bool(self._jeton and self._instance_id)
 
     @property
     def instance_name(self):
@@ -186,8 +188,8 @@ class LizpackSession:
                     ts = datetime.datetime.fromisoformat(
                         str(raw).replace('Z', '+00:00')
                     ).timestamp()
-                except Exception:
-                    pass
+                except Exception as e:
+                    journal.ignorer(e, f'date illisible sur {item.get("name")}')
 
             results.append({
                 'id':       item['id'],
@@ -368,8 +370,10 @@ class LizpackSession:
                     self.create_folder(part, current)
                     # Invalider le cache du parent pour le prochain appel
                     self._dir_cache.pop(current.rstrip('/') or '/', None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Le serveur recree les dossiers parents a l'envoi : un
+                    # echec ici n'empeche pas l'operation d'aboutir.
+                    journal.ignorer(e, f'creation du dossier distant {part}')
 
             current = current.rstrip('/') + '/' + part
 
@@ -539,7 +543,7 @@ class LizpackSession:
             'User-Agent':    'Mozilla/5.0 (compatible; LizpackPublisher/1.0; QGIS plugin)',
             'Origin':        self.api_base,
             'Referer':       self.api_base + '/',
-            'Authorization': f'JWT {self._token}',
+            'Authorization': f'JWT {self._jeton}',
             'Connection':    'keep-alive',
         }
 

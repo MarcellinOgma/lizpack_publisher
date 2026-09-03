@@ -21,64 +21,95 @@ import io
 import os
 import shutil
 import zipfile
-import xml.etree.ElementTree as ET
+import xml.parsers.expat
 from qgis.PyQt.QtCore import QThread, pyqtSignal
 
-try:
-    from defusedxml.ElementTree import fromstring as _defused_fromstring
-except ImportError:      # defusedxml n'est pas fourni avec QGIS
-    _defused_fromstring = None
+from . import journal
+
+
+class ErreurXml(Exception):
+    """XML illisible, ou refuse parce qu'il declare des entites."""
+
+
+class Element:
+    """Noeud minimal : juste ce que le plugin lit dans un .qgs.
+
+    Le module xml.etree n'est pas importe. Il est signale comme
+    vulnerable par les analyseurs, et a raison de l'etre : ses parseurs
+    expansent les entites. Ici on pilote expat directement, en refusant
+    toute declaration d'entite, et on reconstruit l'arbre soi-meme —
+    quarante lignes contre une dependance signalee.
+    """
+
+    __slots__ = ('tag', 'text', 'enfants')
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.text = ''
+        self.enfants = []
+
+    def iter(self, tag=None):
+        """Parcourt le noeud et sa descendance, comme ElementTree."""
+        if tag is None or self.tag == tag:
+            yield self
+        for enfant in self.enfants:
+            yield from enfant.iter(tag)
+
+    def __repr__(self):
+        return f'<Element {self.tag!r} {len(self.enfants)} enfant(s)>'
 
 
 def parse_qgs_xml(xml_text):
-    """Parse le XML d'un .qgs venant du serveur, sans exposer QGIS aux
-    attaques XML (entites externes / XXE, billion laughs).
+    """Lit le XML d'un .qgs venant du serveur.
 
-    Utilise defusedxml s'il est disponible, sinon un parseur expat durci.
-    NB : la DOCTYPE reste acceptee — QGIS en ecrit une dans chaque .qgs
-    (<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>) ; ce sont
-    les DECLARATIONS D'ENTITES qui sont refusees, et c'est par elles que
-    passent XXE et les bombes d'expansion.
-    Leve ET.ParseError comme ET.fromstring.
+    Les declarations d'entites sont refusees : c'est par elles que
+    passent les entites externes (lecture de fichiers du poste) et les
+    bombes d'expansion. La DOCTYPE, elle, reste acceptee — QGIS en ecrit
+    une dans chaque projet :
+        <!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+
+    Leve ErreurXml sur un document illisible ou refuse.
     """
-    if _defused_fromstring is not None:
-        try:
-            return _defused_fromstring(xml_text)
-        except ET.ParseError:
-            raise
-        except Exception as exc:
-            # DefusedXmlException (entite interdite) -> traite comme un XML invalide
-            raise ET.ParseError(str(exc))
+    racine = None
+    pile = []
 
-    # Pas de defusedxml : on pilote expat directement, car les handlers
-    # poses sur ET.XMLParser().parser sont ignores par l'accelerateur C.
-    import xml.parsers.expat
+    def ouvrir(tag, _attrs):
+        nonlocal racine
+        # separateur "}" + prefixe "{" : memes noms qualifies qu'ElementTree
+        noeud = Element(('{' + tag) if '}' in tag else tag)
+        if pile:
+            pile[-1].enfants.append(noeud)
+        else:
+            racine = noeud
+        pile.append(noeud)
 
-    builder = ET.TreeBuilder()
-    # separateur "}" + prefixe "{" : memes noms qualifies que ET.fromstring
-    expat = xml.parsers.expat.ParserCreate(None, '}')
+    def fermer(_tag):
+        if pile:
+            pile.pop()
 
-    def _forbid_entity(*_args, **_kwargs):
-        raise ET.ParseError("Declaration d'entite XML interdite")
+    def texte(donnees):
+        if pile:
+            pile[-1].text += donnees
 
-    expat.EntityDeclHandler = _forbid_entity
-    expat.UnparsedEntityDeclHandler = _forbid_entity
-    expat.ExternalEntityRefHandler = lambda *_a, **_k: False
-    expat.StartElementHandler = lambda tag, attrs: builder.start(
-        ('{' + tag) if '}' in tag else tag,
-        {(('{' + k) if '}' in k else k): v for k, v in attrs.items()},
-    )
-    expat.EndElementHandler = lambda tag: builder.end(
-        ('{' + tag) if '}' in tag else tag
-    )
-    expat.CharacterDataHandler = builder.data
+    def refuser_entite(*_args, **_kwargs):
+        raise ErreurXml("Declaration d'entite XML interdite")
+
+    analyseur = xml.parsers.expat.ParserCreate(None, '}')
+    analyseur.EntityDeclHandler = refuser_entite
+    analyseur.UnparsedEntityDeclHandler = refuser_entite
+    analyseur.ExternalEntityRefHandler = lambda *_a, **_k: False
+    analyseur.StartElementHandler = ouvrir
+    analyseur.EndElementHandler = fermer
+    analyseur.CharacterDataHandler = texte
 
     try:
-        expat.Parse(xml_text, True)
+        analyseur.Parse(xml_text, True)
     except xml.parsers.expat.ExpatError as exc:
-        raise ET.ParseError(str(exc))
+        raise ErreurXml(str(exc))
 
-    return builder.close()
+    if racine is None:
+        raise ErreurXml('document vide')
+    return racine
 
 
 class ListFilesWorker(QThread):
@@ -345,6 +376,13 @@ class DownloadProjectWorker(QThread):
             'ogc:', 'ftp://', 'memory?', 'virtual:',
         )):
             return None
+        # Ignorer : datasources en cle=valeur des fournisseurs de tuiles et
+        # de services. Une couche XYZ s'ecrit « type=xyz&url=https://... » :
+        # elle ne commence donc pas par http, et etait comptee comme un
+        # fichier local manquant apres chaque telechargement.
+        bas = clean.lower()
+        if bas.startswith('type=') or 'url=' in bas or bas.startswith('crs='):
+            return None
         # Ignorer : chemins absolus qui ne correspondent pas à un relatif
         if os.path.isabs(clean) and not clean.startswith('./') and not clean.startswith('../'):
             return None
@@ -460,8 +498,8 @@ class SaveSymbologyWorker(QThread):
                 if upload_path != self.local_path:
                     try:
                         os.remove(upload_path)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        journal.ignorer(e, 'suppression du fichier temporaire')
 
             self.finished.emit()
         except Exception as e:
@@ -750,8 +788,8 @@ class DiagnosticDbWorker(_FilBase):
             if connexion is not None:
                 try:
                     connexion.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    journal.ignorer(e, 'fermeture de la connexion a la base')
 
 
 class OptimiserDbWorker(_FilBase):
@@ -780,8 +818,8 @@ class OptimiserDbWorker(_FilBase):
             if connexion is not None:
                 try:
                     connexion.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    journal.ignorer(e, 'fermeture de la connexion a la base')
 
 
 class ImportToPostGISWorker(QThread):

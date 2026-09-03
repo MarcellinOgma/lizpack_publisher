@@ -31,6 +31,8 @@ Deux principes tiennent tout le module :
    ces cas sont signales avec le SQL a executer, jamais appliques.
 """
 
+from . import journal
+
 # Gravites, de la plus forte a la plus faible
 GRAVE, MOYEN, MINEUR = 'grave', 'moyen', 'mineur'
 
@@ -347,7 +349,8 @@ def _colonne_utilisable(curseur, oid, cible, lignes):
                 f'count(*) - count({colonne}) FROM {cible}'
             )
             total, distincts, nuls = curseur.fetchone()
-        except Exception:
+        except Exception as e:
+            journal.ignorer(e, f'unicite de la colonne {nom}')
             continue
         if total and total == distincts and not nuls:
             return nom, True, typname
@@ -587,7 +590,8 @@ def diagnostiquer(curseur, journal=None):
         try:
             curseur.execute(SQL_SOMMETS.format(geom=citer(geom), cible=cible))
             sommets = curseur.fetchone()[0] or 0
-        except Exception:
+        except Exception as e:
+            journal.ignorer(e, f'comptage des sommets de {cible}')
             continue
         if sommets < SEUIL_SOMMETS:
             continue
@@ -750,8 +754,8 @@ def appliquer(connexion, problemes, journal=None):
             finally:
                 try:
                     curseur.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    journal.ignorer(e, 'fermeture du curseur')
     finally:
         connexion.autocommit = ancien_autocommit
     return reussies, echouees
