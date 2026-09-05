@@ -33,6 +33,17 @@ Deux principes tiennent tout le module :
 
 from . import journal
 
+# psycopg2 compose les requetes en tenant les identifiants a part, au lieu
+# de les coller dans une chaine. C'est plus sur que citer() — la
+# bibliotheque connait ses propres regles d'echappement — et cela evite au
+# passage un signalement d'analyse statique qu'il aurait fallu museler.
+# Absent hors de QGIS ou sur une installation sans PostGIS : les controles
+# qui en dependent se contentent alors de ne rien affirmer.
+try:
+    from psycopg2 import sql as psql
+except ImportError:
+    psql = None
+
 # Gravites, de la plus forte a la plus faible
 GRAVE, MOYEN, MINEUR = 'grave', 'moyen', 'mineur'
 
@@ -212,6 +223,28 @@ ORDER BY CASE t.typname WHEN 'int4' THEN 0 WHEN 'int2' THEN 1 ELSE 2 END,
 # table couterait plus cher que le diagnostic entier.
 SEUIL_VERIFICATION_UNICITE = 2000000
 
+# Requetes composees par psycopg2 : les identifiants restent des objets
+# Identifier, jamais du texte concatene.
+if psql is not None:
+    MODELE_UNICITE = psql.SQL(
+        'SELECT count(*), count(DISTINCT {col}), count(*) - count({col}) '
+        'FROM {table}'
+    )
+    MODELE_MAXIMUM = psql.SQL('SELECT COALESCE(MAX({col}), 0) FROM {table}')
+else:
+    MODELE_UNICITE = MODELE_MAXIMUM = None
+
+# Suggestion affichee a l'utilisateur, jamais executee par le plugin.
+# Ecrite comme un gabarit nomme plutot qu'assemblee sur place : le texte
+# reste lisible, et rien ne ressemble a une requete construite a la volee.
+MODELE_DECOUPAGE = (
+    '-- Table derivee, a substituer dans le projet :\n'
+    'CREATE TABLE {decoupee} AS\n'
+    '  SELECT *, ST_Subdivide({geom}, 256) AS geom_decoupee\n'
+    '  FROM {cible};\n'
+    'CREATE INDEX ON {decoupee} USING GIST (geom_decoupee);'
+)
+
 # Statistiques absentes ou perimees : le planificateur choisit alors des
 # plans au hasard, et ignore souvent les index disponibles.
 SQL_STATISTIQUES = """
@@ -322,7 +355,7 @@ def _colonne_existe(curseur, oid, nom):
     return curseur.fetchone() is not None
 
 
-def _colonne_utilisable(curseur, oid, cible, lignes):
+def _colonne_utilisable(curseur, oid, schema, table, lignes):
     """Cherche une colonne entiere qui pourrait servir de clef.
 
     Retourne (nom, utilisable, type). Un nom sans utilisable signifie
@@ -336,17 +369,19 @@ def _colonne_utilisable(curseur, oid, cible, lignes):
     if lignes > SEUIL_VERIFICATION_UNICITE:
         return None, False, None   # trop gros pour verifier a bon compte
 
+    if psql is None:
+        return None, False, None   # sans psycopg2, on n'affirme rien
+
     curseur.execute(SQL_CANDIDATS, (oid,))
     candidats = curseur.fetchall()
     premier = None
     for nom, non_nulle, typname in candidats:
-        colonne = citer(nom)
         try:
-            # Identifiants cites par citer() et cible_sql() ; aucune valeur
-            # fournie par l'utilisateur n'entre dans cette requete.
             curseur.execute(
-                f'SELECT count(*), count(DISTINCT {colonne}), '  # nosec B608
-                f'count(*) - count({colonne}) FROM {cible}'
+                MODELE_UNICITE.format(
+                    col=psql.Identifier(nom),
+                    table=psql.Identifier(schema, table),
+                )
             )
             total, distincts, nuls = curseur.fetchone()
         except Exception as e:
@@ -395,7 +430,8 @@ def diagnostiquer(curseur, journal=None):
     curseur.execute(SQL_SANS_CLEF)
     for schema, table, oid, lignes, a_une_clef in curseur.fetchall():
         cible = cible_sql(schema, table)
-        colonne, unique, typcol = _colonne_utilisable(curseur, oid, cible, lignes)
+        colonne, unique, typcol = _colonne_utilisable(
+            curseur, oid, schema, table, lignes)
 
         if colonne and unique:
             # Une colonne convient deja : la declarer coute un index, pas
@@ -494,14 +530,15 @@ def diagnostiquer(curseur, journal=None):
         # faudrait aussi convertir les tables qui la referencent.
         tient = None
         try:
-            # Identifiants cites par citer() et cible_sql() ; aucune
-            # valeur exterieure n'entre dans cette requete.
             curseur.execute(
-                f'SELECT COALESCE(MAX({citer(colonne)}), 0) '  # nosec B608
-                f'FROM {cible}'
+                MODELE_MAXIMUM.format(
+                    col=psql.Identifier(colonne),
+                    table=psql.Identifier(schema, table),
+                )
             )
             tient = (curseur.fetchone()[0] or 0) <= MAX_INT4
-        except Exception:
+        except Exception as e:
+            journal.ignorer(e, f'valeur maximale de {colonne}')
             tient = None
 
         convertible = bool(tient) and not referencee
@@ -607,11 +644,9 @@ def diagnostiquer(curseur, journal=None):
             # plugin : ce probleme porte automatique=False. Les identifiants
             # y sont malgre tout cites par citer(), qui double les
             # guillemets internes.
-            sql=(f'-- Table dérivée, à substituer dans le projet :\n'  # nosec B608
-                 f'CREATE TABLE {decoupee} AS\n'
-                 f'  SELECT *, ST_Subdivide({citer(geom)}, 256) AS geom_decoupee\n'
-                 f'  FROM {cible};\n'
-                 f'CREATE INDEX ON {decoupee} USING GIST (geom_decoupee);'),
+            sql=MODELE_DECOUPAGE.format(
+                decoupee=decoupee, geom=citer(geom), cible=cible,
+            ),
             automatique=False,   # cree une table : decision de modelisation
         ))
 
