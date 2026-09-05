@@ -4,7 +4,7 @@ Les versions suivent [SemVer](https://semver.org/lang/fr/) : `MAJEURE.MINEURE.CO
 
 ---
 
-## 1.0.1 — 2026-09-03
+## 1.1.1 — 2026-09-05
 
 Première version publiable. Trois plantages de QGIS corrigés, un onglet
 PostGIS qui diagnostique et répare la base, et le partage d'instances entre
