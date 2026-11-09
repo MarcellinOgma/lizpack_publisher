@@ -18,6 +18,7 @@ plugin.py
 Point d'entrée du plugin QGIS LizPack Publisher v2.
 """
 import os
+from .i18n import tr
 
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon, QPixmap, QPainter
@@ -57,7 +58,7 @@ class LizpackPublisherPlugin:
     def initGui(self):
         icon = _lizpack_icon()
         self.action = QAction(icon, 'LizPack Publisher', self.iface.mainWindow())
-        self.action.setToolTip('Publier et gérer vos projets QGIS sur LizPack')
+        self.action.setToolTip(tr('Publier et gérer vos projets QGIS sur LizPack'))
         self.action.triggered.connect(self.run)
 
         self.iface.addPluginToWebMenu('LizPack', self.action)
@@ -85,6 +86,11 @@ class LizpackPublisherPlugin:
         if self.dialog is None:
             from .dialog import LizpackDialog
             self.dialog = LizpackDialog(self.iface)
-        self.dialog.show()
+        # Une fenetre reduite est deja « visible » pour Qt : show() ne la
+        # restaure pas, et le clic sur l'icone semblait sans effet.
+        if self.dialog.isMinimized():
+            self.dialog.showNormal()
+        else:
+            self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()

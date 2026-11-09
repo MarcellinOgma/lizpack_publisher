@@ -20,6 +20,7 @@ Icônes SVG (Feather Icons), palette navy/bleu, design carte.
 Flow : email + password → JWT → dropdown instances → connexion instance
 """
 import os
+from .i18n import tr
 import tempfile
 from datetime import datetime
 
@@ -31,7 +32,9 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy, QFrame, QMenu, QInputDialog, QMessageBox, QApplication,
     QCheckBox, QListView, QSplitter,
 )
-from qgis.PyQt.QtCore import Qt, QByteArray, QSize, QTimer, QUrl, QSettings
+from qgis.PyQt.QtCore import (
+    Qt, QByteArray, QSize, QTimer, QUrl, QSettings, QEvent,
+)
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtGui import QIcon, QPixmap, QPainter, QCursor, QColor
 from qgis.PyQt.QtSvg import QSvgRenderer
@@ -42,13 +45,15 @@ from qgis.core import (
 )
 
 from . import journal
+from . import liaison_bd
 from .api_client import LizpackSession
+from .session_entreprise import SessionEntreprise, normaliser_adresse
 from .workers import (
     LoginWorker, ConnectInstanceWorker, UploadFolderWorker,
     DownloadProjectWorker, SaveSymbologyWorker, ListFilesWorker,
     DeleteWorker, CreateFolderWorker, RenameWorker, UploadFilesWorker,
     ImportToPostGISWorker, DiagnosticDbWorker, OptimiserDbWorker,
-    ListeInstancesWorker,
+    ListeInstancesWorker, ValidationWorker, ListerTablesWorker,
 )
 
 
@@ -63,6 +68,8 @@ _SVG_TPL = (
 )
 
 _SVG = {
+    'tool':
+        '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
     'lock':
         '<rect x="3" y="11" width="18" height="11" rx="2"/>'
         '<path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
@@ -310,9 +317,9 @@ def _letter_icon(letter: str, bg: str, size: int = 20) -> QIcon:
 _C_PRIMARY       = '#083D44'   # --color-primary
 _C_PRIMARY_LIGHT = '#0a4a53'   # --color-primary-light
 _C_PRIMARY_DARK  = '#062d32'   # --color-primary-dark
-_C_SECONDARY     = '#3D9B4E'   # --color-secondary
-_C_SECONDARY_LT  = '#4db15f'   # --color-secondary-light
-_C_SECONDARY_DK  = '#2d7a3c'   # --color-secondary-dark
+_C_SECONDARY     = '#2F7A3E'   # --color-secondary
+_C_SECONDARY_LT  = '#256231'   # --color-secondary-light
+_C_SECONDARY_DK  = '#1F5229'   # --color-secondary-dark
 
 # ← _C_BLUE supprimé : utiliser _C_INFO (#3B82F6) à la place
 
@@ -324,70 +331,66 @@ _C_HOVER  = '#F3F4F6'   # --bg-hover
 
 # Texte
 _C_TEXT   = '#1a1a1a'   # --text-primary
-_C_MUTED  = '#6B7280'   # --text-secondary
-_C_FAINT  = '#9CA3AF'   # --text-tertiary
+_C_MUTED  = '#4B5563'   # --text-secondary
+_C_FAINT  = '#5B6472'   # --text-tertiary
 
 # Bordures
 _C_BORDER = '#E5E7EB'   # --border-primary
 
 # États
-_C_SUCCESS    = '#10B981'
+_C_SUCCESS    = '#047857'
 _C_SUCCESS_BG = '#D1FAE5'
 _C_SUCCESS_TX = '#065F46'
-_C_ERROR      = '#EF4444'
+_C_ERROR      = '#B91C1C'
 _C_ERROR_BG   = '#FEE2E2'
 _C_ERROR_TX   = '#991B1B'
-_C_WARN       = '#F59E0B'
+_C_WARN       = '#B45309'
 _C_WARN_BG    = '#FEF3C7'
 _C_WARN_TX    = '#92400E'
-_C_INFO       = '#3B82F6'
+_C_INFO       = '#1D4ED8'
 _C_INFO_BG    = '#DBEAFE'
 _C_INFO_TX    = '#1E40AF'
 
+# Boutons : une seule famille, celle de la charte (espace client, Field).
+# Principal vert, secondaire blanc a filet gris et texte petrole ; aucun
+# fond teinte au survol ; desactive estompe (vert a 55 %).
+_C_DESACTIVE = '#8DB695'
 _BTN_PRIMARY = f"""
 QPushButton {{
-    background: {_C_PRIMARY}; color: white;
-    border-radius: 8px; padding: 9px 20px;
-    font-size: 14px; font-weight: 600; border: none;
-}}
-QPushButton:hover    {{ background: {_C_PRIMARY_LIGHT}; }}
-QPushButton:pressed  {{ background: {_C_PRIMARY_DARK}; }}
-QPushButton:disabled {{ background: {_C_FAINT}; color: rgba(255,255,255,.6); }}
-"""
-
-_BTN_SUCCESS = f"""
-QPushButton {{
     background: {_C_SECONDARY}; color: white;
-    border-radius: 8px; padding: 9px 20px;
+    border-radius: 10px; padding: 9px 20px;
     font-size: 14px; font-weight: 600; border: none;
 }}
 QPushButton:hover    {{ background: {_C_SECONDARY_LT}; }}
-QPushButton:pressed  {{ background: {_C_SECONDARY_DK}; }}
-QPushButton:disabled {{ background: {_C_FAINT}; color: rgba(255,255,255,.6); }}
+QPushButton:pressed  {{ background: {_C_SECONDARY_LT}; }}
+QPushButton:focus    {{ border: 2px solid {_C_SECONDARY_DK}; }}
+QPushButton:disabled {{ background: {_C_DESACTIVE}; color: white; }}
 """
+
+_BTN_SUCCESS = _BTN_PRIMARY
 
 _BTN_GHOST = f"""
 QPushButton {{
-    background: transparent; color: {_C_MUTED};
-    border-radius: 8px; padding: 8px 16px;
-    font-size: 14px; font-weight: 500;
-    border: 1.5px solid {_C_BORDER};
+    background: {_C_CARD}; color: {_C_PRIMARY};
+    border-radius: 10px; padding: 8px 16px;
+    font-size: 14px; font-weight: 600;
+    border: 1px solid {_C_BORDER};
 }}
-QPushButton:hover    {{ background: {_C_HOVER}; color: {_C_TEXT}; border-color: {_C_MUTED}; }}
-QPushButton:pressed  {{ background: {_C_BG_TER}; }}
-QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; }}
+QPushButton:hover    {{ border-color: #7C8595; }}
+QPushButton:focus    {{ border: 2px solid {_C_PRIMARY}; }}
+QPushButton:disabled {{ color: #9AA3AE; border-color: {_C_BORDER}; }}
 """
 
 _BTN_ICON = f"""
 QPushButton {{
-    background: {_C_BG_TER}; color: {_C_MUTED};
+    background: {_C_CARD}; color: {_C_PRIMARY};
     border-radius: 8px; padding: 6px;
     border: 1px solid {_C_BORDER};
     min-width: 32px; max-width: 32px;
     min-height: 32px; max-height: 32px;
 }}
-QPushButton:hover   {{ background: {_C_HOVER}; color: {_C_TEXT}; }}
-QPushButton:pressed {{ background: {_C_BORDER}; }}
+QPushButton:hover   {{ border-color: #7C8595; }}
+QPushButton:focus   {{ border: 2px solid {_C_PRIMARY}; }}
 """
 
 _QSS = f"""
@@ -398,33 +401,30 @@ QDialog {{
 
 /* ── Tabs ─────────────────────────────────────────────────── */
 QTabWidget::pane {{
-    border: 1px solid {_C_BORDER};
-    border-radius: 0 8px 8px 8px;
+    border: none;
+    border-top: 1px solid {_C_BORDER};
     background: {_C_BG};
     top: -1px;
 }}
+/* Onglets de la charte : texte gris, actif vert souligne de vert, aucune
+   teinte au survol. */
 QTabBar::tab {{
-    background: {_C_BG_TER};
+    background: transparent;
     color: {_C_MUTED};
-    padding: 9px 22px;
-    border: 1px solid {_C_BORDER};
-    border-bottom: none;
-    border-top-left-radius: 8px;
-    border-top-right-radius: 8px;
-    margin-right: 3px;
+    padding: 10px 14px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    margin-right: 4px;
     font-size: 14px;
-    font-weight: 500;
+    font-weight: 600;
     min-width: 80px;
 }}
 QTabBar::tab:selected {{
-    background: {_C_BG};
-    color: {_C_PRIMARY};
-    font-weight: 700;
-    border-color: {_C_BORDER};
+    color: {_C_SECONDARY};
+    border-bottom: 3px solid {_C_SECONDARY};
 }}
-QTabBar::tab:hover:!selected {{
-    background: {_C_HOVER};
-    color: {_C_TEXT};
+QTabBar::tab:focus {{
+    color: {_C_SECONDARY};
 }}
 
 /* ── Cards / GroupBox ─────────────────────────────────────── */
@@ -478,7 +478,10 @@ QComboBox {{
     min-height: 20px;
 }}
 QComboBox:focus    {{ border-color: {_C_PRIMARY}; }}
-QComboBox:disabled {{ background: {_C_BG_TER}; color: {_C_FAINT}; }}
+QComboBox:disabled {{ background: {_C_BG_TER}; color: {_C_MUTED}; }}
+/* Liste figée (serveur choisi pendant la session) : sans flèche, elle se lit
+   comme un champ en lecture, pas comme un bouton cassé. */
+QComboBox::drop-down:disabled {{ width: 0px; border: none; }}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;
@@ -493,18 +496,20 @@ QComboBox::drop-down:hover {{ background: {_C_BORDER}; }}
    ::down-arrow le bouton n'est qu'un rectangle gris et rien ne signale
    qu'il y a une liste. La regle est injectee ici. */
 {_QSS_FLECHE}
+/* La liste est une fenetre a part, posee dans un conteneur qui dessine
+   deja son cadre. Lui en donner un second empilait deux bordures — l'une
+   carree, l'autre arrondie — avec une marge visible entre les deux. */
 QComboBox QAbstractItemView {{
-    border: 1.5px solid {_C_BORDER};
-    border-radius: 8px;
+    border: none;
     background: {_C_CARD};
-    padding: 6px;
+    padding: 4px;
     outline: none;
 }}
 /* Sans regle ::item, Qt peint lui-meme la ligne courante en cadre blanc.
    Ces trois regles ne prennent effet qu'avec une vue Qt (voir setView). */
 QComboBox QAbstractItemView::item {{
-    min-height: 30px;
-    padding: 6px 10px;
+    min-height: 24px;
+    padding: 5px 10px;
     border-radius: 6px;
     color: {_C_TEXT};
     border: none;
@@ -589,15 +594,16 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 # File-type → (icon_name, color)
 # Taille d'ouverture par defaut, bornee a l'ecran disponible au lancement.
 _GEOMETRIE_DEFAUT = (900, 880)
+_SUPPORT_URL = 'https://lizpack.com/client/aide-support'
 _GEOMETRIE_CLE    = 'LizpackPublisher/geometrie'
 
 # Repartition des trois sections de l'onglet PostGIS, retenue d'une
 # session a l'autre.
 _SECTIONS_PG_CLE = 'LizpackPublisher/sections_postgis'
+_AUTHCFG_BD_CLE  = 'LizpackPublisher/authcfg_bd'
 
 # Le journal est-il replie ? Replie par defaut, et retenu d'une session
 # a l'autre des que l'utilisateur en decide autrement.
-_JOURNAL_REPLIE_CLE = 'LizpackPublisher/journal_replie'
 
 # Fils encore en cours quand la fenetre se ferme. Ils survivent ici,
 # hors de la fenetre, jusqu'a la fin de leur travail : les detruire
@@ -618,12 +624,24 @@ _SOUVENIR_CLE = 'LizpackPublisher/se_souvenir'
 _EMAIL_CLE    = 'LizpackPublisher/email'
 _AUTHCFG_CLE  = 'LizpackPublisher/authcfg'
 
+# Serveur de son organisation (édition entreprise) : adresse du portail et
+# certificat d'autorité en clair (rien de secret) ; le jeton d'API, comme le
+# mot de passe, seulement dans le magasin d'authentification de QGIS.
+_MODE_CLE          = 'LizpackPublisher/serveur'
+_PORTAIL_CLE       = 'LizpackPublisher/portail'
+_CERTIFICAT_CLE    = 'LizpackPublisher/certificat'
+_AUTHCFG_JETON_CLE = 'LizpackPublisher/authcfg_jeton'
+_MSG_JETON_LECTURE = (tr("Jeton d'API en lecture seule : rien ne peut être envoyé, "
+                      'déplacé ni supprimé. Créez un jeton sans lecture seule '
+                      'dans le portail pour publier.'))
+
 # Tables techniques de QGIS, jamais pertinentes comme couche pour l'utilisateur.
 _PG_TABLES_INTERNES = {'layer_styles', 'qgis_projects'}
 
 _FILE_ICONS = {
     '.qgz':     ('map',       _C_PRIMARY),
     '.qgs':     ('map',       _C_PRIMARY),
+    '.qdash':   ('activity',   _C_PRIMARY),
     '.gpkg':    ('database',  '#8e44ad'),
     '.shp':     ('layers',    _C_SECONDARY),
     '.geojson': ('layers',    _C_SECONDARY),
@@ -658,9 +676,11 @@ class LizpackDialog(QDialog):
         self._registered_pg_conn = None
         self._fils = []   # fils en cours, gardes en vie (voir _suivre)
         self._lecture_seule = False   # espace partage sans droit d'ecriture
+        self._jeton_lecture = False   # jeton d'API en lecture seule (entreprise)
+        self._dest_choisie = False    # destination fixee d'un clic
 
         self.setWindowTitle('LIZPACK Publisher')
-        self.setMinimumSize(640, 720)
+        self.setMinimumSize(700, 720)  # les cinq onglets visibles sans flèches
         self.setWindowFlags(Qt.WindowType.Window)
         self.setStyleSheet(_QSS)
         self._build_ui()
@@ -675,6 +695,12 @@ class LizpackDialog(QDialog):
         # laissait l'etiquette et le bouton sur l'ancien etat.
         QgsProject.instance().cleared.connect(self._on_qgis_project_changed)
         QgsProject.instance().fileNameChanged.connect(self._on_qgis_project_changed)
+
+        # Un clic ailleurs referme le journal. Les enfants consomment leurs
+        # clics avant que la fenetre ne les voie : il faut donc ecouter au
+        # niveau de l'application, et se desinscrire a la fermeture — un
+        # filtre laisse derriere soi survit a la fenetre et fait tomber QGIS.
+        QApplication.instance().installEventFilter(self)
 
     # ══════════════════════════════════════════════════════════════════
     # Repertoire de travail
@@ -709,7 +735,7 @@ class LizpackDialog(QDialog):
         except Exception as e:
             # QGIS trop ancien : le reste fonctionne quand meme.
             journal.ignorer(e, 'répertoire de projet QGIS')
-        self._log(f'Répertoire de travail : {dossier}')
+        self._log(tr('Répertoire de travail : {0}', dossier))
 
     # ══════════════════════════════════════════════════════════════════
     # Fils d'execution
@@ -767,8 +793,21 @@ class LizpackDialog(QDialog):
         simplement le champ vide : l'email pre-rempli reste utile.
         """
         reglages = QSettings()
+        # Serveur choisi la derniere fois, et son adresse : rien de secret.
+        if reglages.value(_MODE_CLE, '') == 'entreprise':
+            self.cmb_serveur.setCurrentIndex(1)
+        self.txt_portail.setText(reglages.value(_PORTAIL_CLE, '') or '')
+        self.txt_certificat.setText(reglages.value(_CERTIFICAT_CLE, '') or '')
         if reglages.value(_SOUVENIR_CLE, False, type=bool) is not True:
             return
+        jeton = reglages.value(_AUTHCFG_JETON_CLE, '') or ''
+        if jeton:
+            try:
+                config = QgsAuthMethodConfig()
+                if QgsApplication.authManager().loadAuthenticationConfig(jeton, config, True):
+                    self.txt_jeton.setText(config.config('password', ''))
+            except Exception as e:
+                journal.ignorer(e, "lecture du jeton dans le magasin d'authentification")
 
         self.chk_souvenir.blockSignals(True)
         self.chk_souvenir.setChecked(True)
@@ -788,11 +827,16 @@ class LizpackDialog(QDialog):
             # l'utilisateur retape son mot de passe.
             journal.ignorer(e, 'lecture du magasin d\'authentification')
 
-    def _enregistrer_identifiants(self, email, mot_de_passe):
-        """Retient les identifiants apres une authentification reussie."""
+    def _enregistrer_identifiants(self, email, mot_de_passe, cle=_AUTHCFG_CLE,
+                                  enregistrer_email=True):
+        """Retient les identifiants apres une authentification reussie.
+
+        Serveur de son organisation : `email` est l'adresse du portail et
+        `mot_de_passe` le jeton d'API, garde sous sa propre cle."""
         reglages = QSettings()
         reglages.setValue(_SOUVENIR_CLE, True)
-        reglages.setValue(_EMAIL_CLE, email)
+        if enregistrer_email:
+            reglages.setValue(_EMAIL_CLE, email)
 
         try:
             gestionnaire = QgsApplication.authManager()
@@ -802,29 +846,34 @@ class LizpackDialog(QDialog):
             config.setConfig('username', email)
             config.setConfig('password', mot_de_passe)
 
-            ancien = reglages.value(_AUTHCFG_CLE, '') or ''
+            ancien = reglages.value(cle, '') or ''
             if ancien:
                 gestionnaire.removeAuthenticationConfig(ancien)
 
             if gestionnaire.storeAuthenticationConfig(config):
-                reglages.setValue(_AUTHCFG_CLE, config.id())
-                self._log('Identifiants enregistrés (magasin QGIS).', 'ok')
+                reglages.setValue(cle, config.id())
+                self._log(tr('Identifiants enregistrés (magasin QGIS).'), 'ok')
                 return
         except Exception as e:
-            self._log(f'Mot de passe non enregistré : {e}', 'warn')
+            self._log(tr('Mot de passe non enregistré : {0}', e), 'warn')
 
         # Repli : on garde l'email, jamais le mot de passe en clair.
-        reglages.remove(_AUTHCFG_CLE)
+        reglages.remove(cle)
         self._log(
-            'Seul l\'email a été retenu — le magasin d\'authentification '
-            'de QGIS n\'est pas disponible.',
+            tr("Seul l'email a été retenu : le magasin d'authentification de QGIS n'est pas disponible."),
             'warn',
         )
 
     def _oublier_identifiants(self):
-        """Efface tout ce qui a été retenu, mot de passe compris."""
+        """Efface tout ce qui a été retenu, mot de passe et jeton compris."""
         reglages = QSettings()
-        authcfg = reglages.value(_AUTHCFG_CLE, '') or ''
+        for cle in (_AUTHCFG_CLE, _AUTHCFG_JETON_CLE):
+            self._oublier_authcfg(reglages, cle)
+        reglages.remove(_EMAIL_CLE)
+        reglages.setValue(_SOUVENIR_CLE, False)
+
+    def _oublier_authcfg(self, reglages, cle):
+        authcfg = reglages.value(cle, '') or ''
         if authcfg:
             # Taire un echec ici laisserait croire le mot de passe efface
             # alors qu'il reste dans le magasin. removeAuthenticationConfig
@@ -840,20 +889,18 @@ class LizpackDialog(QDialog):
                 reste = "{} ({})".format(authcfg, e)
             if reste:
                 self._log(
-                    "Le mot de passe n'a pas pu etre retire du magasin "
+                    tr("Le mot de passe n'a pas pu etre retire du magasin "
                     "d'authentification de QGIS ({}). "
-                    "Retirez-le depuis Preferences > Authentification.".format(reste),
+                    "Retirez-le depuis Preferences > Authentification.").format(reste),
                     'warn',
                 )
-        reglages.remove(_AUTHCFG_CLE)
-        reglages.remove(_EMAIL_CLE)
-        reglages.setValue(_SOUVENIR_CLE, False)
+        reglages.remove(cle)
 
     def _on_souvenir_change(self, coche):
         """Decocher efface immediatement, sans attendre la prochaine connexion."""
         if not coche:
             self._oublier_identifiants()
-            self._log('Identifiants oubliés.')
+            self._log(tr('Identifiants oubliés.'))
 
     # ══════════════════════════════════════════════════════════════════
     # Geometrie de la fenetre
@@ -911,11 +958,103 @@ class LizpackDialog(QDialog):
             except (TypeError, RuntimeError):
                 pass   # deja debranche
 
+    def _suivre_changement_ecran(self):
+        """Refait la mise en page quand la fenetre change d'ecran.
+
+        Sur un poste a plusieurs ecrans d'echelles differentes — ici un 150 %
+        a cote de deux 100 % — Qt ne recalcule pas toujours la disposition
+        au passage de l'un a l'autre : le cadre prend la taille demandee,
+        le contenu reste dispose pour l'ancienne echelle, et la fenetre
+        parait n'occuper que les deux tiers de sa largeur.
+
+        Rien ne garantit la presence d'une fenetre native ni du signal :
+        l'absence n'est pas une erreur, elle prive seulement du correctif.
+        """
+        try:
+            poignee = self.windowHandle()
+            if poignee is None:
+                return
+            poignee.screenChanged.connect(lambda _e: self._reposer_disposition())
+        except Exception as e:
+            journal.ignorer(e, "suivi du changement d'ecran")
+
+    def _reposer_disposition(self):
+        """Force Qt a refaire la mise en page a la taille courante."""
+        try:
+            disposition = self.layout()
+            if disposition is None:
+                return
+            disposition.invalidate()
+            disposition.activate()
+            self.updateGeometry()
+            # Une taille identique ne declenche pas de resizeEvent : on
+            # passe par un pixel de moins, puis on revient.
+            taille = self.size()
+            self.resize(taille.width() - 1, taille.height())
+            self.resize(taille)
+        except Exception as e:
+            journal.ignorer(e, "remise en page apres changement d'ecran")
+
+    def showEvent(self, event):
+        """Repose le filtre a chaque affichage.
+
+        closeEvent le retire ; sans cela, la fenetre rouverte ne refermait
+        plus le journal au clic.
+        """
+        QApplication.instance().installEventFilter(self)
+        # La fenetre native n'existe qu'a partir de l'affichage : c'est le
+        # premier moment ou l'on peut ecouter ses changements d'ecran.
+        self._suivre_changement_ecran()
+        super().showEvent(event)
+
+    def _changer_langue(self, code):
+        """Retient la langue choisie et rouvre l'extension dans cette langue.
+
+        Les textes sont poses a la construction des fenetres : la seule facon
+        sure de tout changer est de recharger l'extension, puis de la rouvrir.
+        """
+        from . import i18n
+        if code == i18n.LANGUE:
+            return
+        if self.session.is_connected() or self._fils_actifs():
+            rep = QMessageBox.question(
+                self, tr('Langue'),
+                tr("Changer de langue rouvre la fenêtre : la connexion en cours "
+                   "et les opérations en cours seront interrompues. Continuer ?"))
+            if rep != QMessageBox.StandardButton.Yes:
+                return
+        QSettings().setValue(i18n.CLE_LANGUE, code)
+        paquet = __package__
+
+        def relancer():
+            import qgis.utils
+            qgis.utils.reloadPlugin(paquet)
+            extension = qgis.utils.plugins.get(paquet)
+            if extension is not None:
+                extension.run()
+
+        QTimer.singleShot(0, relancer)
+
+    def _fils_actifs(self):
+        """Une operation tourne-t-elle encore ?"""
+        for nom, valeur in vars(self).items():
+            if hasattr(valeur, 'isRunning'):
+                try:
+                    if valeur.isRunning():
+                        return True
+                except RuntimeError:
+                    pass
+        return False
+
     def closeEvent(self, event):
         """Retenir la geometrie et mettre les fils encore actifs a l'abri."""
         QSettings().setValue(_GEOMETRIE_CLE, self.saveGeometry())
         self._memoriser_sections_pg()
         self._orpheliner_fils()
+        try:
+            QApplication.instance().removeEventFilter(self)
+        except Exception as e:
+            journal.ignorer(e, "retrait du filtre d'evenements")
         super().closeEvent(event)
 
     # ══════════════════════════════════════════════════════════════════
@@ -956,11 +1095,11 @@ class LizpackDialog(QDialog):
         t_pg   = self._tab_postgis()
         t_docs = self._tab_docs()
 
-        self.tabs.addTab(t_conn, _icon('lock',         _C_PRIMARY, 15), '  Connexion')
-        self.tabs.addTab(t_proj, _icon('layers',       _C_PRIMARY, 15), '  Projets')
-        self.tabs.addTab(t_upld, _icon('upload-cloud', _C_PRIMARY, 15), '  Upload')
+        self.tabs.addTab(t_conn, _icon('lock',         _C_PRIMARY, 15), '  ' + tr('Connexion'))
+        self.tabs.addTab(t_proj, _icon('layers',       _C_PRIMARY, 15), '  ' + tr('Projets'))
+        self.tabs.addTab(t_upld, _icon('upload-cloud', _C_PRIMARY, 15), '  ' + tr('Upload'))
         self.tabs.addTab(t_pg,   _icon('database',     _C_PRIMARY, 15), '  PostGIS')
-        self.tabs.addTab(t_docs, _icon('book-open',    _C_PRIMARY, 15), '  Aide')
+        self.tabs.addTab(t_docs, _icon('book-open',    _C_PRIMARY, 15), '  ' + tr('Aide'))
         # Facteur 1 : l'espace disponible va aux onglets. Sans lui, Qt le
         # partage avec le bloc du journal, dont la hauteur est plafonnee :
         # celui-ci ne grandit pas mais ecarte son en-tete de sa console,
@@ -1028,12 +1167,43 @@ class LizpackDialog(QDialog):
         lbl_title.setStyleSheet(
             'font-size: 14px; font-weight: 700; letter-spacing: 0.3px;'
         )
-        lbl_sub = QLabel('v2')
+        lbl_sub = QLabel(tr('v{}').format(_version_du_plugin()))
         lbl_sub.setStyleSheet('font-size: 12px; color: rgba(255,255,255,.45);')
         titles.addWidget(lbl_title)
         titles.addWidget(lbl_sub)
         h.addLayout(titles)
         h.addStretch()
+
+        # Langue de l'extension : changer rouvre la fenetre dans la nouvelle.
+        from . import i18n
+        # Un bouton et son menu : la liste deroulante heritait du texte blanc
+        # de l'en-tete et s'ouvrait vide.
+        self.cmb_langue = QPushButton(i18n.LANGUE.upper())
+        self.cmb_langue.setAccessibleName(tr('Langue'))
+        self.cmb_langue.setToolTip(tr('Langue'))
+        self.cmb_langue.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cmb_langue.setStyleSheet(
+            'QPushButton { font-size: 13px; font-weight: 600; color: white; '
+            'background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.35); '
+            'border-radius: 8px; padding: 4px 12px; }'
+            'QPushButton:focus { border: 2px solid white; }'
+            'QPushButton::menu-indicator { width: 0px; }'
+        )
+        menu_langue = QMenu(self.cmb_langue)
+        menu_langue.setStyleSheet(
+            'QMenu { background: white; border: 1px solid #E5E7EB; padding: 4px; }'
+            'QMenu::item { color: #111827; padding: 6px 18px; font-size: 13px; }'
+            'QMenu::item:selected { color: #083D44; font-weight: 600; background: white; }'
+        )
+        for code, nom in (('fr', 'Français'), ('en', 'English'),
+                          ('es', 'Español'), ('pt', 'Português')):
+            act = menu_langue.addAction(f'{code.upper()}  {nom}')
+            act.setCheckable(True)
+            act.setChecked(code == i18n.LANGUE)
+            act.triggered.connect(lambda _=False, c=code: self._changer_langue(c))
+        self.cmb_langue.setMenu(menu_langue)
+        h.addWidget(self.cmb_langue)
+        h.addSpacing(8)
 
         # Status badge
         self.lbl_status = QLabel()
@@ -1068,7 +1238,29 @@ class LizpackDialog(QDialog):
             f'QPushButton:hover {{ color: {_C_TEXT}; }}'
         )
         self.btn_journal.clicked.connect(self._basculer_journal)
-        pile.addWidget(self.btn_journal)
+
+        # L'en-tete tient sur une ligne : le titre repliable a gauche, la
+        # copie a droite. Copier reste possible journal replie — c'est
+        # justement ce qu'on fait pour envoyer une trace au support.
+        self.btn_copier_journal = QPushButton(tr('Copier'))
+        self.btn_copier_journal.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copier_journal.setToolTip(
+            tr('Copie tout le journal dans le presse-papiers.'))
+        self.btn_copier_journal.setStyleSheet(
+            'QPushButton {'
+            f'  color: {_C_MUTED}; background: transparent; border: none;'
+            '   padding: 2px 4px; font-size: 12px; font-weight: 600;'
+            '}'
+            f'QPushButton:hover {{ color: {_C_TEXT}; }}'
+        )
+        self.btn_copier_journal.clicked.connect(self._copier_journal)
+
+        entete = QHBoxLayout()
+        entete.setContentsMargins(0, 0, 0, 0)
+        entete.addWidget(self.btn_journal)
+        entete.addStretch()
+        entete.addWidget(self.btn_copier_journal)
+        pile.addLayout(entete)
 
         self.log = QTextEdit()
         self.log.setObjectName('lp_console')
@@ -1090,10 +1282,12 @@ class LizpackDialog(QDialog):
         bloc.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Maximum)
 
-        # Replie par defaut : la place profite a la liste des fichiers. Une
-        # erreur le deploie d'elle-meme, l'information n'est donc pas perdue.
-        replie = QSettings().value(_JOURNAL_REPLIE_CLE, True, type=bool)
-        self._appliquer_etat_journal(bool(replie))
+        # Toujours replie a l'ouverture : la place profite a la liste des
+        # fichiers, et une erreur le deploie d'elle-meme. Le deploiement
+        # ne vaut donc que pour la session en cours — retenir le choix
+        # faisait qu'une seule consultation du journal l'ouvrait pour
+        # toujours.
+        self._appliquer_etat_journal(True)
         return bloc
 
     def _appliquer_etat_journal(self, replie):
@@ -1101,20 +1295,104 @@ class LizpackDialog(QDialog):
         self._journal_replie = replie
         self.log.setVisible(not replie)
         fleche = '▸' if replie else '▾'
-        self.btn_journal.setText(f'{fleche}  Journal')
+        self.btn_journal.setText(tr('{0}  Journal', fleche))
         self.btn_journal.setToolTip(
-            'Afficher le journal' if replie else 'Replier le journal'
+            tr('Afficher le journal') if replie else tr('Replier le journal')
         )
 
+    def eventFilter(self, objet, evenement):
+        """Referme les panneaux de passage des qu'on clique ailleurs.
+
+        Le journal et le rapport de validation se deploient sur un
+        evenement — une erreur, un examen demande —, on les lit, puis ils
+        encombrent. Les refermer d'un clic evite d'avoir a viser leur
+        bouton.
+
+        Rien n'est enregistre : la preference exprimee en cliquant sur
+        l'en-tete du journal n'est pas ecrasee par un clic de travail.
+        """
+        if (evenement.type() != QEvent.Type.MouseButtonPress
+                or not self.isVisible()):
+            return super().eventFilter(objet, evenement)
+
+        if (not getattr(self, '_journal_replie', True)
+                and self._clic_hors_de(objet, (self.log, self.btn_journal,
+                                               self.btn_copier_journal))):
+            self._appliquer_etat_journal(True)
+
+        return super().eventFilter(objet, evenement)
+
+    def _clic_hors_de(self, objet, epargnes):
+        """Vrai si le clic vise cette fenetre, hors des widgets epargnes.
+
+        On epargne le panneau lui-meme — on y selectionne du texte, on y
+        deplie des lignes — et la commande qui l'ouvre : refermer ce qu'on
+        vient de demander serait deroutant.
+        """
+        if not isinstance(objet, QWidget):
+            return False
+        widget = objet
+        dans_la_fenetre = False
+        while widget is not None:
+            if widget in epargnes:
+                return False
+            if widget is self:
+                dans_la_fenetre = True
+            widget = widget.parentWidget()
+        return dans_la_fenetre
+
+    def _copier_journal(self):
+        """Met tout le journal dans le presse-papiers."""
+        texte = self.log.toPlainText()
+        if not texte.strip():
+            self._log(tr('Le journal est vide.'), 'warn')
+            return
+        QApplication.clipboard().setText(texte)
+        lignes = len(texte.strip().split(chr(10)))
+        self._log(tr('Journal copié ({} ligne(s)).').format(lignes), 'ok')
+        self._confirmer_copie()
+
+    def _confirmer_copie(self):
+        """Marque le bouton comme copie, puis le laisse revenir.
+
+        Le journal est replie la plupart du temps : la ligne ajoutee dedans
+        ne se voit pas. La confirmation doit donc etre sur le bouton, la ou
+        le regard se trouve deja.
+        """
+        self.btn_copier_journal.setText(tr('✓  Copié'))
+        self.btn_copier_journal.setStyleSheet(
+            'QPushButton {'
+            f'  color: {_C_SUCCESS_TX}; background: transparent; border: none;'
+            '   padding: 2px 4px; font-size: 12px; font-weight: 600;'
+            '}'
+        )
+        QTimer.singleShot(1600, self._retablir_bouton_copie)
+
+    def _retablir_bouton_copie(self):
+        """Remet le bouton dans son etat de repos.
+
+        Appele par un minuteur : la fenetre peut avoir ete fermee entre
+        temps, auquel cas le bouton n'existe plus cote Qt.
+        """
+        try:
+            self.btn_copier_journal.setText(tr('Copier'))
+            self.btn_copier_journal.setStyleSheet(
+                'QPushButton {'
+                f'  color: {_C_MUTED}; background: transparent; border: none;'
+                '   padding: 2px 4px; font-size: 12px; font-weight: 600;'
+                '}'
+                f'QPushButton:hover {{ color: {_C_TEXT}; }}'
+            )
+        except RuntimeError as e:
+            journal.ignorer(e, 'retablissement du bouton de copie')
+
     def _basculer_journal(self):
-        """Replie ou deploie le journal, et retient le choix."""
+        """Replie ou deploie le journal, pour la session en cours."""
         self._appliquer_etat_journal(not getattr(self, '_journal_replie', False))
-        QSettings().setValue(_JOURNAL_REPLIE_CLE, self._journal_replie)
 
     # ── Onglet Aide / Documentation ──────────────────────────────────
     def _tab_docs(self):
         # NOTE accept : remplacer lizpack.com par accept.lizpack.com
-        _SUPPORT_URL = 'https://lizpack.com/client/aide-support'
 
         from qgis.PyQt.QtWidgets import QScrollArea
 
@@ -1212,117 +1490,161 @@ class LizpackDialog(QDialog):
         # ══════════════════════════════════════════════════════════════
         # SECTION 1 — Premiers pas
         # ══════════════════════════════════════════════════════════════
-        v.addWidget(_section_title('Premiers pas', 'zap', _C_SECONDARY))
-        v.addWidget(_step(1, 'Se connecter',
-            'Dans l\'onglet Connexion, entrez votre email et mot de passe LIZPACK, '
-            'puis cliquez sur Se connecter.'))
-        v.addWidget(_step(2, 'Choisir une instance',
-            'Sélectionnez votre instance dans la liste déroulante (statut RUNNING = active), '
-            'puis cliquez sur Connecter à l\'instance.'))
-        v.addWidget(_step(3, 'Naviguer dans les fichiers',
-            'L\'onglet Projets affiche vos fichiers. Double-cliquez sur un dossier pour y entrer. '
-            'Utilisez ← Retour pour remonter.'))
-        v.addWidget(_step(4, 'Retenir vos identifiants',
-            "Cochez Se souvenir de mes identifiants : le mot de passe est "
+        v.addWidget(_section_title(tr('Premiers pas'), 'zap', _C_PRIMARY))
+        v.addWidget(_step(1, tr('Se connecter'),
+            tr('Dans l\'onglet Connexion, entrez votre email et mot de passe LIZPACK, '
+            'puis cliquez sur Se connecter. Serveur LizPack de votre organisation : '
+            'choisissez « Serveur de mon organisation », entrez l\'adresse du portail '
+            'et un jeton d\'API (portail : Paramètres > Sécurité > Créer un jeton).')))
+        v.addWidget(_step(2, tr('Choisir une instance'),
+            tr('Sélectionnez votre instance dans la liste déroulante (statut RUNNING = active), '
+            'puis cliquez sur Connecter à l\'instance.')))
+        v.addWidget(_step(3, tr('Naviguer dans les fichiers'),
+            tr('L\'onglet Projets affiche vos fichiers. Double-cliquez sur un dossier pour y entrer. '
+            'Utilisez ← Retour pour remonter.')))
+        v.addWidget(_step(4, tr('Retenir vos identifiants'),
+            tr("Cochez Se souvenir de mes identifiants : le mot de passe est "
             "confié au magasin d'authentification de QGIS, qui le chiffre. "
-            "Il n'est jamais écrit en clair."))
-        v.addWidget(_step(5, 'Espaces partagés',
-            "Si une équipe vous a partagé ses instances, un choix Espace "
+            "Il n'est jamais écrit en clair.")))
+        v.addWidget(_step(5, tr('Espaces partagés'),
+            tr("Si une équipe vous a partagé ses instances, un choix Espace "
             "apparaît. Vos droits y sont ceux que le propriétaire vous a "
-            "accordés."))
+            "accordés.")))
+        v.addWidget(_step(6, tr('Rafraîchir'),
+            tr("Le bouton Rafraîchir redemande au serveur tout ce qui a été lu "
+            "à la connexion : identifiants de la base, quota, permissions et "
+            "fichiers. À employer après une modification faite depuis votre "
+            "espace client, sans avoir à vous déconnecter.")))
         v.addWidget(_tip(
-            'Vos identifiants sont ceux de votre espace client LIZPACK (lizpack.com).',
+            tr('Vos identifiants sont ceux de votre espace client LIZPACK (lizpack.com).'),
             'info'))
 
         # ══════════════════════════════════════════════════════════════
         # SECTION 2 — Ouvrir un projet
         # ══════════════════════════════════════════════════════════════
-        v.addWidget(_section_title('Ouvrir un projet depuis le serveur', 'download', _C_PRIMARY))
-        v.addWidget(_step(1, 'Localiser le fichier .qgs ou .qgz',
-            'Naviguez dans l\'arborescence jusqu\'au fichier projet.'))
-        v.addWidget(_step(2, 'Double-cliquer ou cliquer Ouvrir',
-            'Le projet est téléchargé dans un dossier temporaire local avec toutes ses données '
-            '(shapefiles, rasters, GeoJSON…). Le chemin reproduit la structure du serveur.'))
-        v.addWidget(_step(3, 'Choisir où enregistrer',
-            "Le plugin demande le dossier de destination, puis rapatrie le "
-            "dossier serveur entier — sous-dossiers compris — en une seule "
-            "requête. Ce dossier devient le répertoire de travail."))
-        v.addWidget(_step(4, 'QGIS charge le projet',
-            'Les couches sont disponibles immédiatement. Si des fichiers manquent sur le serveur, '
-            'un avertissement s\'affiche dans la console.'))
+        v.addWidget(_section_title(tr('Ouvrir un projet depuis le serveur'), 'download', _C_PRIMARY))
+        v.addWidget(_step(1, tr('Localiser le fichier .qgs ou .qgz'),
+            tr('Naviguez dans l\'arborescence jusqu\'au fichier projet.')))
+        v.addWidget(_step(2, tr('Double-cliquer ou cliquer Ouvrir'),
+            tr('Le projet est téléchargé dans un dossier temporaire local avec toutes ses données '
+            '(shapefiles, rasters, GeoJSON…). Le chemin reproduit la structure du serveur.')))
+        v.addWidget(_step(3, tr('Choisir où enregistrer'),
+            tr('Le plugin demande le dossier de destination, puis rapatrie le dossier serveur entier, sous-dossiers compris, en une seule requête. Ce dossier devient le répertoire de travail.')))
+        v.addWidget(_step(4, tr('QGIS charge le projet'),
+            tr('Les couches sont disponibles immédiatement. Si des fichiers manquent sur le serveur, '
+            'un avertissement s\'affiche dans la console.')))
+        v.addWidget(_step(5, tr('Les couches PostGIS se rebranchent seules'),
+            tr("Un projet publié porte l'adresse interne de la base, celle que "
+            "Lizmap emploie depuis le serveur. À l'ouverture, le plugin la "
+            "remplace par celle de votre poste et confie le mot de passe au "
+            "magasin d'authentification de QGIS. Sans cela, les couches "
+            "arrivaient vides.")))
         v.addWidget(_tip(
-            'Les fichiers téléchargés sont placés dans %TEMP%/lizpack/ — ils sont réutilisés '
-            'lors du prochain téléchargement du même projet.', 'ok'))
+            tr("Le mot de passe de la base n'est jamais écrit en clair dans le "
+            "projet enregistré sur votre disque : celui-ci ne porte qu'une "
+            "référence au magasin de QGIS."), 'ok'))
 
         # ══════════════════════════════════════════════════════════════
         # SECTION 3 — Publier un projet
         # ══════════════════════════════════════════════════════════════
-        v.addWidget(_section_title('Publier un projet vers Lizmap', 'upload-cloud', _C_SECONDARY))
-        v.addWidget(_step(1, 'Ouvrir ou créer un projet dans QGIS',
-            'Tout projet ouvert dans QGIS peut être publié — qu\'il vienne du serveur ou d\'un '
-            'fichier local.'))
-        v.addWidget(_step(2, 'Définir la destination',
-            'Cliquez sur un fichier dans l\'arbre pour pré-remplir le chemin de destination, '
-            'ou saisissez-le manuellement (ex: /qgis/mon-projet.qgs).'))
-        v.addWidget(_step(3, 'Cliquer sur Publier vers Lizmap',
-            'Le projet est sauvegardé localement puis uploadé sur le serveur. '
-            'Lizmap recharge automatiquement la configuration.'))
+        v.addWidget(_section_title(tr('Publier un projet vers Lizmap'), 'upload-cloud', _C_PRIMARY))
+        v.addWidget(_step(1, tr('Ouvrir ou créer un projet dans QGIS'),
+            tr("Tout projet ouvert dans QGIS peut être publié, qu'il vienne du serveur ou d'un fichier local.")))
+        v.addWidget(_step(2, tr('Définir la destination'),
+            tr('Cliquez sur un fichier dans l\'arbre pour pré-remplir le chemin de destination, '
+            'ou saisissez-le manuellement (ex: /qgis/mon-projet.qgs).')))
+        v.addWidget(_step(3, tr('Cliquer sur Publier vers Lizmap'),
+            tr('Le projet est sauvegardé localement puis uploadé sur le serveur. '
+            'Lizmap recharge automatiquement la configuration.')))
         v.addWidget(_tip(
-            'Après publication, vérifiez que votre fichier lizmap_plugin_print.qgs (si existant) '
-            'est aussi à jour sur le serveur.', 'warn'))
+            tr('Après publication, vérifiez que votre fichier lizmap_plugin_print.qgs (si existant) '
+            'est aussi à jour sur le serveur.'), 'warn'))
+
+        # ══════════════════════════════════════════════════════════════
+        # SECTION 3 bis — Valider un projet
+        # ══════════════════════════════════════════════════════════════
+        v.addSpacing(6)
+        v.addWidget(_section_title(tr('Valider un projet'), 'check-circle', _C_PRIMARY))
+        v.addWidget(_step(1, tr('Avant de publier'),
+            tr("Le bouton Valider le projet fait examiner le projet actif par le "
+            "serveur, sans rien publier ni écrire. Un clic droit sur un projet "
+            "de la liste examine celui qui est déjà en ligne.")))
+        v.addWidget(_step(2, tr('Ce qui est contrôlé'),
+            tr("Connexions de la base, clefs primaires, index spatiaux, "
+            "projections, cohérence entre le système déclaré et celui de la "
+            "base, expressions et chemins locaux.")))
+        v.addWidget(_step(3, tr('Lire le rapport'),
+            tr("Les signalements sont classés par gravité. Choisissez une ligne "
+            "pour lire la conséquence et la solution.")))
+        v.addWidget(_tip(
+            tr("Deux règles seules font refuser la publication : des couches en "
+            "projections mélangées, et des connexions de base étrangères à "
+            "l'instance. Les autres signalements dégradent la carte sans "
+            "l'interdire."), 'warn'))
 
         # ══════════════════════════════════════════════════════════════
         # SECTION 4 — Gestion des fichiers
         # ══════════════════════════════════════════════════════════════
-        v.addWidget(_section_title('Gestion des fichiers', 'folder-plus', '#e67e22'))
-        v.addWidget(_step(1, 'Créer un dossier',
-            'Cliquez sur l\'icône 📁+ ou faites un clic droit → Nouveau dossier ici.'))
-        v.addWidget(_step(2, 'Uploader des fichiers',
-            'Cliquez sur l\'icône ↑ pour sélectionner un ou plusieurs fichiers locaux '
-            'à envoyer dans le dossier courant.'))
-        v.addWidget(_step(3, 'Renommer / Supprimer',
-            'Sélectionnez un élément et cliquez sur les icônes ✏️ ou 🗑, '
-            'ou utilisez le clic droit. La suppression demande confirmation.'))
+        v.addWidget(_section_title(tr('Gestion des fichiers'), 'folder-plus', '#e67e22'))
+        v.addWidget(_step(1, tr('Créer un dossier'),
+            tr('Cliquez sur l\'icône 📁+ ou faites un clic droit → Nouveau dossier ici.')))
+        v.addWidget(_step(2, tr('Uploader des fichiers'),
+            tr('Cliquez sur l\'icône ↑ pour sélectionner un ou plusieurs fichiers locaux '
+            'à envoyer dans le dossier courant.')))
+        v.addWidget(_step(3, tr('Renommer / Supprimer'),
+            tr('Sélectionnez un élément et cliquez sur les icônes ✏️ ou 🗑, '
+            'ou utilisez le clic droit. La suppression demande confirmation.')))
         v.addWidget(_tip(
-            'La sélection multiple (Ctrl+clic) permet de supprimer '
-            "plusieurs éléments d'un coup.", 'info'))
+            tr('La sélection multiple (Ctrl+clic) permet de supprimer '
+            "plusieurs éléments d'un coup."), 'info'))
 
         # ══════════════════════════════════════════════════════════════
         # SECTION 5 — PostGIS
         # ══════════════════════════════════════════════════════════════
-        v.addWidget(_section_title('Connexion PostGIS', 'database', '#8e44ad'))
-        v.addWidget(_step(1, 'Vérifier la disponibilité',
-            'L\'onglet PostGIS est disponible uniquement si votre instance dispose d\'une base '
-            'PostgreSQL/PostGIS configurée.'))
-        v.addWidget(_step(2, 'Charger les tables',
-            'Cliquez sur Charger les tables pour lister les couches géométriques disponibles.'))
-        v.addWidget(_step(3, 'Ajouter une couche dans QGIS',
-            'Double-cliquez sur une table pour l\'ajouter directement en tant que couche vectorielle.'))
-        v.addWidget(_tip('Si PostGIS n\'est pas disponible, un bandeau jaune s\'affiche dans l\'onglet.', 'warn'))
+        v.addWidget(_section_title(tr('Connexion PostGIS'), 'database', '#8e44ad'))
+        v.addWidget(_step(1, tr('Vérifier la disponibilité'),
+            tr('L\'onglet PostGIS est disponible uniquement si votre instance dispose d\'une base '
+            'PostgreSQL/PostGIS configurée.')))
+        v.addWidget(_step(2, tr('Charger les tables'),
+            tr('Cliquez sur Charger les tables pour lister les couches géométriques disponibles.')))
+        v.addWidget(_step(3, tr('Ajouter une couche dans QGIS'),
+            tr('Double-cliquez sur une table pour l\'ajouter directement en tant que couche vectorielle.')))
+        v.addWidget(_tip(tr('Si PostGIS n\'est pas disponible, un bandeau jaune s\'affiche dans l\'onglet.'), 'warn'))
 
         # ══════════════════════════════════════════════════════════════
         v.addSpacing(6)
-        v.addWidget(_section_title('Santé de la base', 'activity', _C_ERROR))
-        v.addWidget(_step(1, 'Diagnostiquer',
-            "Analyse la base sans rien y écrire : index spatiaux manquants, "
+        v.addWidget(_section_title(tr('Santé de la base'), 'activity', _C_ERROR))
+        v.addWidget(_step(1, tr('Diagnostiquer'),
+            tr("Analyse la base sans rien y écrire : index spatiaux manquants, "
             "tables sans clef primaire utilisable, clefs en bigint que QGIS "
-            "Serveur refuse, statistiques périmées, polygones trop détaillés."))
-        v.addWidget(_step(2, 'Lire le tableau',
-            "La colonne Correction dit ce que le plugin peut faire : "
+            "Serveur refuse, statistiques périmées, polygones trop détaillés.")))
+        v.addWidget(_step(2, tr('Lire le tableau'),
+            tr("La colonne Correction dit ce que le plugin peut faire : "
             "Automatique, Sur confirmation, ou À la main. Survolez une ligne "
-            "pour voir le SQL et, s'il y a lieu, la commande pour défaire."))
-        v.addWidget(_step(3, 'Optimiser',
-            "Tout optimiser n'applique que les corrections sans risque — index, "
-            "statistiques. Celles qui touchent à la structure demandent d'être "
-            "sélectionnées, et une confirmation détaille leur conséquence."))
-        v.addWidget(_step(4, 'Exporter',
-            "Enregistrez le diagnostic en CSV pour le transmettre, ou en SQL "
+            "pour voir le SQL et, s'il y a lieu, la commande pour défaire.")))
+        v.addWidget(_step(3, tr('Optimiser'),
+            tr("Tout optimiser n'applique que les corrections sans risque : index, statistiques. Celles qui touchent à la structure demandent d'être sélectionnées, et une confirmation détaille leur conséquence.")))
+        v.addWidget(_step(4, tr('Exporter'),
+            tr("Enregistrez le diagnostic en CSV pour le transmettre, ou en SQL "
             "pour le rejouer. Dans le script, les corrections à la main sont "
-            "commentées."))
+            "commentées.")))
         v.addWidget(_tip(
-            "Un index et des statistiques se défont sans perte. Une colonne "
+            tr("Un index et des statistiques se défont sans perte. Une colonne "
             "ajoutée ou un type converti modifient la table : le plugin ne les "
-            "applique jamais sans votre accord explicite.", 'info'))
+            "applique jamais sans votre accord explicite."), 'info'))
+
+        # ══════════════════════════════════════════════════════════════
+        v.addSpacing(6)
+        v.addWidget(_section_title(tr('Le journal'), 'file-text', _C_MUTED))
+        v.addWidget(_step(1, tr('Ouvrir et fermer'),
+            tr("Le journal, en bas de la fenêtre, s'ouvre en cliquant sur son "
+            "titre et se referme d'un clic n'importe où ailleurs. Il est "
+            "toujours replié à l'ouverture du plugin.")))
+        v.addWidget(_step(2, tr('Copier'),
+            tr("Le bouton Copier place tout le journal dans le presse-papiers, même replié : c'est ce qu'il faut joindre à une demande au support.")))
+        v.addWidget(_tip(
+            tr("Une erreur déploie le journal d'elle-même : elle ne peut pas "
+            "passer inaperçue."), 'info'))
 
         # ══════════════════════════════════════════════════════════════
         # Bouton support
@@ -1333,19 +1655,25 @@ class LizpackDialog(QDialog):
         sep2.setStyleSheet(f'color: {_C_BORDER};')
         v.addWidget(sep2)
 
-        support_row = QHBoxLayout()
-        lbl_support = QLabel('Vous ne trouvez pas la réponse ?')
+        # Le support : celui de LizPack, ou celui de l'organisation quand on
+        # est sur son portail (Paramètres > Apparence du portail).
+        self._support_url = _SUPPORT_URL
+        self.ligne_support = QWidget()
+        support_row = QHBoxLayout(self.ligne_support)
+        support_row.setContentsMargins(0, 0, 0, 0)
+        lbl_support = QLabel(tr('Vous ne trouvez pas la réponse ?'))
         lbl_support.setStyleSheet(f'font-size: 13px; color: {_C_MUTED}; background: transparent;')
-        btn_support = _btn('Contacter le support', 'message-circle', _C_TEXT, _BTN_GHOST)
-        btn_support.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(_SUPPORT_URL))
+        self.btn_support = _btn(tr('Contacter le support'), 'message-circle', _C_PRIMARY, _BTN_GHOST)
+        self.btn_support.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self._support_url))
         )
         support_row.addWidget(lbl_support)
         support_row.addStretch()
-        support_row.addWidget(btn_support)
-        v.addLayout(support_row)
+        support_row.addWidget(self.btn_support)
+        v.addWidget(self.ligne_support)
 
-        footer = QLabel('LIZPACK Publisher · Plugin QGIS')
+        footer = QLabel('LIZPACK Publisher · Plugin QGIS · v{}'.format(
+            _version_du_plugin()))
         footer.setStyleSheet(f'font-size: 12px; color: {_C_FAINT}; padding: 2px 0;')
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(footer)
@@ -1358,38 +1686,98 @@ class LizpackDialog(QDialog):
 
     # ── Onglet Connexion ─────────────────────────────────────────────
     def _tab_connexion(self):
+        # Sous une certaine hauteur, Qt cesse de respecter la taille
+        # minimale des champs et les ecrase : le texte d'un QLineEdit se
+        # retrouve coupe en deux. Le contenu defile donc, comme dans
+        # l'onglet PostGIS, plutot que d'etre comprime.
+        from qgis.PyQt.QtWidgets import QScrollArea
+
         tab = QWidget()
-        v   = QVBoxLayout(tab)
+        exterieur = QVBoxLayout(tab)
+        exterieur.setContentsMargins(0, 0, 0, 0)
+        exterieur.setSpacing(0)
+
+        defilement = QScrollArea()
+        defilement.setWidgetResizable(True)
+        defilement.setFrameShape(QFrame.Shape.NoFrame)
+        defilement.setStyleSheet(
+            'QScrollArea { background: transparent; border: none; }')
+
+        interieur = QWidget()
+        v = QVBoxLayout(interieur)
         v.setContentsMargins(10, 14, 10, 10)
         v.setSpacing(8)
 
         # ── Étape 1
-        grp1 = QGroupBox('Étape 1 — Identifiants')
-        f1   = QFormLayout(grp1)
-        f1.setSpacing(12)
-        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        grp1 = QGroupBox(tr('Étape 1 · Identifiants'))
+        # Une ligne par champ dans une pile : une ligne masquée (champs de
+        # l'autre serveur) ne laisse pas de trou, à l'inverse de QFormLayout.
+        f1   = _Lignes(grp1)
+
+        # LizPack (lizpack.com) ou le serveur LizPack Entreprise installé
+        # dans l'organisation : même plugin, autre porte d'entrée.
+        self.cmb_serveur = _liste_deroulante(QComboBox())
+        self.cmb_serveur.addItem(tr('LizPack (lizpack.com)'), userData='mutualise')
+        self.cmb_serveur.addItem(tr('Serveur de mon organisation'), userData='entreprise')
+        self.cmb_serveur.setAccessibleName(tr('Serveur'))
+        f1.addRow(_form_label(tr('Serveur')), self.cmb_serveur)
 
         self.txt_email = _input_with_icon('votre@email.com')
         self.txt_pwd   = _input_with_icon('••••••••', password=True)
         self.txt_pwd.returnPressed.connect(self._do_login)
+        self.lbl_email = _form_label(tr('Email'))
+        self.lbl_pwd   = _form_label(tr('Mot de passe'))
+        f1.addRow(self.lbl_email, self.txt_email)
+        f1.addRow(self.lbl_pwd,   self.txt_pwd)
 
-        f1.addRow(_form_label('Email'),           self.txt_email)
-        f1.addRow(_form_label('Mot de passe'),    self.txt_pwd)
+        self.txt_portail = _input_with_icon('https://portail.mon-organisation.org')
+        self.txt_portail.setToolTip(
+            tr("L'adresse du portail LizPack de votre organisation, telle "
+            "que vous l'ouvrez dans le navigateur."))
+        self.txt_jeton = _input_with_icon('lzp_…', password=True)
+        self.txt_jeton.setToolTip(
+            tr("À créer dans le portail : Paramètres > Sécurité > Créer un jeton "
+            "(« Gérer les fichiers » au minimum). "
+            'Il remplace le mot de passe et le code de double authentification.'))
+        self.txt_jeton.returnPressed.connect(self._do_login)
+        self.txt_certificat = _input_with_icon(tr('Facultatif : certificat .pem ou .crt'))
+        self.txt_certificat.setToolTip(
+            tr('Seulement si le portail utilise un certificat de votre organisation '
+            "que le système ne reconnaît pas : le fichier de l'autorité de certification."))
+        self.btn_certificat = QPushButton(tr('Parcourir…'))
+        self.btn_certificat.setStyleSheet(_BTN_GHOST)
+        self.btn_certificat.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_certificat.setToolTip(tr('Choisir le fichier du certificat'))
+        self.btn_certificat.clicked.connect(self._choisir_certificat)
+        ligne_cert = QHBoxLayout()
+        ligne_cert.setContentsMargins(0, 0, 0, 0)
+        ligne_cert.addWidget(self.txt_certificat, 1)
+        ligne_cert.addWidget(self.btn_certificat)
+        self.zone_certificat = QWidget()
+        self.zone_certificat.setLayout(ligne_cert)
+        self.lbl_portail    = _form_label(tr('Portail'))
+        self.lbl_jeton      = _form_label(tr("Jeton d'API"))
+        self.lbl_certificat = _form_label(tr('Certificat'))
+        f1.addRow(self.lbl_portail,    self.txt_portail)
+        f1.addRow(self.lbl_jeton,      self.txt_jeton)
+        f1.addRow(self.lbl_certificat, self.zone_certificat)
+        self.cmb_serveur.currentIndexChanged.connect(lambda _i: self._sync_mode_serveur())
 
-        self.chk_souvenir = QCheckBox('Se souvenir de mes identifiants')
+        self.chk_souvenir = QCheckBox(tr('Se souvenir de mes identifiants'))
         self.chk_souvenir.setToolTip(
-            'Le mot de passe est confie au magasin d\'authentification de '
+            tr('Le mot de passe est confie au magasin d\'authentification de '
             'QGIS, qui le chiffre. QGIS demandera son mot de passe '
-            'principal a la premiere utilisation.'
+            'principal a la premiere utilisation.')
         )
         self.chk_souvenir.setStyleSheet(f'font-size: 12px; color: {_C_MUTED};')
         self.chk_souvenir.toggled.connect(self._on_souvenir_change)
         f1.addRow('', self.chk_souvenir)
         v.addWidget(grp1)
+        self._sync_mode_serveur()
 
         row1 = QHBoxLayout()
-        self.btn_login = _btn('Se connecter', 'lock', 'white', _BTN_PRIMARY)
-        self.btn_logout = _btn('Déconnexion', 'log-out', _C_MUTED, _BTN_GHOST)
+        self.btn_login = _btn(tr('Se connecter'), 'lock', 'white', _BTN_PRIMARY)
+        self.btn_logout = _btn(tr('Déconnexion'), 'log-out', _C_MUTED, _BTN_GHOST)
         self.btn_logout.setEnabled(False)
         self.btn_login.clicked.connect(self._do_login)
         self.btn_logout.clicked.connect(self._do_logout)
@@ -1399,40 +1787,41 @@ class LizpackDialog(QDialog):
         v.addLayout(row1)
 
         # ── Étape 2
-        self.grp_instance = QGroupBox('Étape 2 — Sélectionner une instance')
+        self.grp_instance = QGroupBox(tr('Étape 2 · Sélectionner une instance'))
         self.grp_instance.setEnabled(False)
-        f2 = QFormLayout(self.grp_instance)
-        f2.setSpacing(12)
-        f2.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        f2 = _Lignes(self.grp_instance)
 
         # Espace de travail : son propre compte, ou celui d'une equipe
         # qui nous a partage des instances. Masque tant qu'aucune equipe
         # n'existe, pour ne pas encombrer le cas courant.
-        self.cmb_espace = QComboBox()
-        self.cmb_espace.setView(QListView())
+        self.cmb_espace = _liste_deroulante(QComboBox())
         self.cmb_espace.setMinimumWidth(300)
         self.cmb_espace.currentIndexChanged.connect(self._on_espace_change)
-        self.lbl_espace = _form_label('Espace')
+        self.lbl_espace = _form_label(tr('Espace'))
         f2.addRow(self.lbl_espace, self.cmb_espace)
-        self.lbl_espace.setVisible(False)
-        self.cmb_espace.setVisible(False)
+        self.lbl_espace.parentWidget().setVisible(False)
 
-        self.cmb_instance = QComboBox()
-        # La liste native de Windows ignore les regles ::item de la
-        # feuille de style : il faut une vue Qt pour qu'elles prennent.
-        self.cmb_instance.setView(QListView())
+        self.cmb_instance = _liste_deroulante(QComboBox())
         self.cmb_instance.setMinimumWidth(300)
-        f2.addRow(_form_label('Instance'), self.cmb_instance)
+        f2.addRow(_form_label(tr('Instance')), self.cmb_instance)
         v.addWidget(self.grp_instance)
 
         row2 = QHBoxLayout()
-        self.btn_connect = _btn("Connecter à l'instance", 'link', 'white', _BTN_SUCCESS)
+        self.btn_connect = _btn(tr("Connecter à l'instance"), 'link', 'white', _BTN_SUCCESS)
         self.btn_connect.setEnabled(False)
         self.btn_connect.clicked.connect(self._do_connect_instance)
         self.cmb_instance.currentIndexChanged.connect(
             lambda _idx: self._sync_connect_button()
         )
+        self.btn_rafraichir = _btn(tr('Rafraîchir'), 'refresh',
+                                   _C_PRIMARY, _BTN_GHOST)
+        self.btn_rafraichir.setEnabled(False)
+        self.btn_rafraichir.setToolTip(
+            tr('Redemande au serveur les informations de cette instance : '
+            'identifiants de base, quota, permissions, fichiers.'))
+        self.btn_rafraichir.clicked.connect(self._do_rafraichir_connexion)
         row2.addWidget(self.btn_connect)
+        row2.addWidget(self.btn_rafraichir)
         row2.addStretch()
         v.addLayout(row2)
 
@@ -1442,12 +1831,56 @@ class LizpackDialog(QDialog):
         )
         v.addWidget(self.lbl_instance_info)
         v.addStretch()
+
+        defilement.setWidget(interieur)
+        exterieur.addWidget(defilement)
         return tab
 
     # ── Onglet Projets ───────────────────────────────────────────────
     def _tab_projets(self):
+        # Cet onglet a grossi : arbre, barre d'actions, publication, et
+        # maintenant le rapport de validation. Sous une certaine hauteur,
+        # Qt cesse de respecter les tailles minimales et empile les blocs
+        # les uns sur les autres — boutons a cheval, arbre reduit a une
+        # ligne. Le contenu defile donc, comme dans Connexion et PostGIS.
+        from qgis.PyQt.QtWidgets import QScrollArea
+
         tab = QWidget()
-        v   = QVBoxLayout(tab)
+        exterieur = QVBoxLayout(tab)
+        exterieur.setContentsMargins(0, 0, 0, 0)
+        exterieur.setSpacing(0)
+
+        # Deux activites distinctes cohabitaient dans un seul onglet : gerer
+        # des fichiers, et lire un rapport. Elles se disputaient la hauteur,
+        # et le rapport chassait l'arbre. Chacune la sienne.
+        self.sous_onglets = QTabWidget()
+        # Meme piege que pour les onglets principaux : Qt calcule la largeur
+        # d'un onglet avec la police du widget, alors que la feuille de style
+        # le peint en 14 px et en gras. Le libelle debordait, rogne des deux
+        # cotes (« tionnaire de fich »). On aligne la police sur celle qui
+        # sera reellement peinte, et on interdit la coupe.
+        self.sous_onglets.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
+        self.sous_onglets.tabBar().setExpanding(False)
+        _police_sous = self.sous_onglets.tabBar().font()
+        _police_sous.setBold(True)
+        _police_sous.setPixelSize(14)
+        self.sous_onglets.tabBar().setFont(_police_sous)
+        exterieur.addWidget(self.sous_onglets)
+
+        # ══ Sous-onglet 1 — Gestionnaire de fichiers ══════════════════
+        page_fichiers = QWidget()
+        pf = QVBoxLayout(page_fichiers)
+        pf.setContentsMargins(0, 0, 0, 0)
+        pf.setSpacing(0)
+
+        defilement = QScrollArea()
+        defilement.setWidgetResizable(True)
+        defilement.setFrameShape(QFrame.Shape.NoFrame)
+        defilement.setStyleSheet(
+            'QScrollArea { background: transparent; border: none; }')
+
+        interieur = QWidget()
+        v = QVBoxLayout(interieur)
         v.setContentsMargins(10, 14, 10, 10)
         v.setSpacing(8)
 
@@ -1458,8 +1891,8 @@ class LizpackDialog(QDialog):
         nav = QHBoxLayout(self.barre_nav)
         nav.setContentsMargins(0, 0, 0, 0)
         nav.setSpacing(6)
-        self.btn_back = QPushButton('← Retour')
-        self.btn_back.setToolTip('Remonter au dossier parent')
+        self.btn_back = QPushButton(tr('← Retour'))
+        self.btn_back.setToolTip(tr('Remonter au dossier parent'))
         self.btn_back.setStyleSheet(f"""
 QPushButton {{
     background: {_C_BG_TER};
@@ -1517,10 +1950,13 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         v.addWidget(self.fichiers_interdits)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(['Fichier', 'Taille', 'Modifié'])
+        self.tree.setHeaderLabels([tr('Fichier'), tr('Taille'), tr('Modifié')])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.tree.header().resizeSection(1, 80)
-        self.tree.header().resizeSection(2, 90)
+        # 80 px suffisaient a « 1.6 MB » ; « 12 elements » deborde.
+        self.tree.header().resizeSection(1, 110)
+        # 90 px suffisaient a la date seule ; avec l'heure, la colonne
+        # tronquait.
+        self.tree.header().resizeSection(2, 130)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setAlternatingRowColors(True)
         self.tree.itemDoubleClicked.connect(self._on_file_dblclick)
@@ -1528,7 +1964,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self.tree.itemSelectionChanged.connect(self._sync_open_button)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
-        v.addWidget(self.tree)
+        # Sans plancher, l'arbre etait le premier sacrifie quand le
+        # rapport de validation s'ouvrait : il tombait a une ligne.
+        self.tree.setMinimumHeight(200)
+        v.addWidget(self.tree, 1)
 
         # Raccourcis clavier sur l'arbre
         from qgis.PyQt.QtWidgets import QShortcut
@@ -1544,50 +1983,50 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         acts.setContentsMargins(0, 0, 0, 0)
         acts.setSpacing(4)
 
-        self.btn_open = _btn('Ouvrir', 'download', 'white', _BTN_PRIMARY)
-        self.btn_open.setToolTip('Ouvrir le projet .qgs/.qgz sélectionné dans QGIS')
+        self.btn_open = _btn(tr('Ouvrir'), 'download', 'white', _BTN_PRIMARY)
+        self.btn_open.setToolTip(tr('Ouvrir le projet .qgs/.qgz sélectionné dans QGIS'))
         self.btn_open.clicked.connect(self._do_open_project)
         self.btn_open.setEnabled(False)
 
         self.btn_mkdir = QPushButton()
         self.btn_mkdir.setIcon(_icon('folder-plus', _C_MUTED, 15))
         self.btn_mkdir.setIconSize(QSize(15, 15))
-        self.btn_mkdir.setToolTip('Nouveau dossier')
+        self.btn_mkdir.setToolTip(tr('Nouveau dossier'))
         self.btn_mkdir.setStyleSheet(_BTN_ICON)
         self.btn_mkdir.clicked.connect(self._do_create_folder)
 
         self.btn_upload_here = QPushButton()
         self.btn_upload_here.setIcon(_icon('upload', _C_MUTED, 15))
         self.btn_upload_here.setIconSize(QSize(15, 15))
-        self.btn_upload_here.setToolTip('Uploader des fichiers ici')
+        self.btn_upload_here.setToolTip(tr('Uploader des fichiers ici'))
         self.btn_upload_here.setStyleSheet(_BTN_ICON)
         self.btn_upload_here.clicked.connect(self._do_upload_here)
 
         self.btn_upload_folder_here = QPushButton()
         self.btn_upload_folder_here.setIcon(_icon('folder-upload', _C_PRIMARY, 15))
         self.btn_upload_folder_here.setIconSize(QSize(15, 15))
-        self.btn_upload_folder_here.setToolTip('Uploader un dossier ici')
+        self.btn_upload_folder_here.setToolTip(tr('Uploader un dossier ici'))
         self.btn_upload_folder_here.setStyleSheet(_BTN_ICON)
         self.btn_upload_folder_here.clicked.connect(self._do_upload_folder_here)
 
         self.btn_delete = QPushButton()
         self.btn_delete.setIcon(_icon('trash-2', '#e74c3c', 15))
         self.btn_delete.setIconSize(QSize(15, 15))
-        self.btn_delete.setToolTip('Supprimer la sélection')
+        self.btn_delete.setToolTip(tr('Supprimer la sélection'))
         self.btn_delete.setStyleSheet(_BTN_ICON)
         self.btn_delete.clicked.connect(self._do_delete_selected)
 
         self.btn_rename = QPushButton()
         self.btn_rename.setIcon(_icon('edit-2', _C_MUTED, 15))
         self.btn_rename.setIconSize(QSize(15, 15))
-        self.btn_rename.setToolTip('Renommer')
+        self.btn_rename.setToolTip(tr('Renommer'))
         self.btn_rename.setStyleSheet(_BTN_ICON)
         self.btn_rename.clicked.connect(self._do_rename_selected)
 
         btn_reload = QPushButton()
         btn_reload.setIcon(_icon('refresh', _C_MUTED, 15))
         btn_reload.setIconSize(QSize(15, 15))
-        btn_reload.setToolTip('Rafraîchir')
+        btn_reload.setToolTip(tr('Rafraîchir'))
         btn_reload.setStyleSheet(_BTN_ICON)
         btn_reload.clicked.connect(self._load_files)
 
@@ -1602,7 +2041,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         v.addWidget(self.barre_actions)
 
         # ── Section Publication ──────────────────────────────────────
-        self.grp_publish = QGroupBox('Publier vers Lizmap')
+        self.grp_publish = QGroupBox(tr('Publier vers Lizmap'))
         self.grp_publish.setStyleSheet(
             f'QGroupBox {{ font-weight: 600; font-size: 13px; color: {_C_TEXT};'
             f'  border: 1px solid {_C_BORDER}; border-radius: 8px; margin-top: 8px;'
@@ -1615,9 +2054,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         # Projet actif détecté dans QGIS
         row_local = QHBoxLayout()
-        lbl_l = QLabel('Projet actif :')
+        lbl_l = QLabel(tr('Projet actif :'))
         lbl_l.setStyleSheet(f'font-size: 13px; color: {_C_MUTED}; min-width: 90px;')
-        self.lbl_local_project = QLabel('Aucun projet ouvert dans QGIS')
+        self.lbl_local_project = QLabel(tr('Aucun projet ouvert dans QGIS'))
         self.lbl_local_project.setStyleSheet(
             f'font-size: 13px; color: {_C_TEXT}; font-style: italic;'
         )
@@ -1628,31 +2067,135 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         # Chemin de destination sur le serveur
         row_dest = QHBoxLayout()
-        lbl_d = QLabel('Destination :')
+        lbl_d = QLabel(tr('Destination :'))
         lbl_d.setStyleSheet(f'font-size: 13px; color: {_C_MUTED}; min-width: 90px;')
         self.txt_publish_dest = QLineEdit()
         self.txt_publish_dest.setReadOnly(True)
         self.txt_publish_dest.setPlaceholderText(
-            'Sélectionnez un fichier ou un dossier dans la liste ci-dessus'
+            tr('Sélectionnez un fichier ou un dossier dans la liste ci-dessus')
         )
         row_dest.addWidget(lbl_d)
         row_dest.addWidget(self.txt_publish_dest, 1)
         pub_v.addLayout(row_dest)
 
-        self.btn_publish = _btn('Publier vers Lizmap', 'upload-cloud', 'white', _BTN_SUCCESS)
+        self.btn_valider = _btn(tr('Valider le projet'), 'check-circle',
+                                _C_PRIMARY, _BTN_GHOST)
+        self.btn_valider.setToolTip(
+            tr('Fait examiner le projet par le serveur sans rien publier :\n'
+            'connexions PostgreSQL, clefs primaires, index, projections,\n'
+            'expressions, chemins locaux.')
+        )
+        self.btn_valider.setEnabled(False)
+        self.btn_valider.clicked.connect(lambda: self._do_valider_projet())
+        self.btn_publish = _btn(tr('Publier vers Lizmap'), 'upload-cloud', 'white', _BTN_SUCCESS)
         self.btn_publish.setToolTip(
-            'Sauvegarde le projet QGIS actif et le publie sur le serveur.\n'
+            tr('Sauvegarde le projet QGIS actif et le publie sur le serveur.\n'
             'Fonctionne avec n\'importe quel projet ouvert dans QGIS.\n'
-            'Lizmap recharge automatiquement.'
+            'Lizmap recharge automatiquement.')
         )
         self.btn_publish.clicked.connect(self._do_publish_project)
         self.btn_publish.setEnabled(False)
         self.txt_publish_dest.textChanged.connect(
             lambda _t: self._sync_publish_button()
         )
+        pub_v.addWidget(self.btn_valider)
         pub_v.addWidget(self.btn_publish)
 
         v.addWidget(self.grp_publish)
+
+        # Rapport de validation. Il a d'abord ete une fenetre modale, qu'il
+        # fallait fermer avant de corriger quoi que ce soit ; puis un panneau
+        # sous la publication, qui chassait l'arbre des fichiers. Il occupe
+        # maintenant son propre sous-onglet, ou la place ne se dispute pas.
+        self.grp_validation = QGroupBox(tr('Validation du projet'))
+        val_v = QVBoxLayout(self.grp_validation)
+        val_v.setSpacing(8)
+
+        self.lbl_validation = QLabel(
+            tr("Aucun rapport pour l'instant. Ouvrez un projet, puis cliquez sur « Valider le projet », dans le gestionnaire de fichiers, ou ci-dessous."))
+        self.lbl_validation.setWordWrap(True)
+        self.lbl_validation.setStyleSheet('font-size: 13px;')
+        val_v.addWidget(self.lbl_validation)
+
+        self.lst_validation = QTreeWidget()
+        self.lst_validation.setHeaderLabels(
+            [tr('Gravité / couche'), tr('Catégorie'), tr('Constat')])
+        entete_val = self.lst_validation.header()
+        entete_val.setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        entete_val.setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        entete_val.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.lst_validation.setAlternatingRowColors(True)
+        # Un constat tient rarement sur une ligne : il etait coupe net, et
+        # il fallait selectionner la ligne pour le lire en entier. Le texte
+        # passe donc a la ligne, et la hauteur des lignes s'ajuste.
+        self.lst_validation.setWordWrap(True)
+        self.lst_validation.setUniformRowHeights(False)
+        # La selection prenait la premiere colonne seule, qui est vide sur
+        # les lignes de signalement : un rectangle bleu isole, sans rapport
+        # apparent avec la ligne lue.
+        self.lst_validation.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        # La colonne d'arborescence — la ou se dessine la fleche de repli —
+        # restait peinte du bleu de selection du systeme, en travers d'une
+        # ligne dont le reste suivait la feuille de style : un rectangle
+        # isole, sans rapport apparent avec la ligne lue.
+        self.lst_validation.setStyleSheet(
+            'QTreeWidget::branch:selected { background: transparent; }'
+            'QTreeWidget::branch:hover { background: transparent; }'
+        )
+        # La page entiere est a lui : plus besoin de le plafonner pour
+        # proteger l'arbre, qui vit maintenant dans l'autre sous-onglet.
+        self.lst_validation.setMinimumHeight(160)
+        self.lst_validation.currentItemChanged.connect(
+            lambda *_: self._montrer_signalement())
+        val_v.addWidget(self.lst_validation, 1)
+
+        self.txt_validation = QTextEdit()
+        self.txt_validation.setReadOnly(True)
+        self.txt_validation.setMinimumHeight(110)
+        self.txt_validation.setMaximumHeight(200)
+        self.txt_validation.setPlaceholderText(
+            tr('Sélectionnez un signalement pour voir la conséquence et la solution.'))
+        val_v.addWidget(self.txt_validation)
+
+        val_btns = QHBoxLayout()
+        self.btn_valider_encore = _btn(tr('Relancer la validation'), 'check-circle',
+                                       _C_PRIMARY, _BTN_GHOST)
+        self.btn_valider_encore.clicked.connect(
+            lambda: self._do_valider_projet())
+        val_btns.addWidget(self.btn_valider_encore)
+        self.btn_corriger = _btn(tr('Corriger dans QGIS'), 'tool',
+                                 'white', _BTN_PRIMARY)
+        self.btn_corriger.setToolTip(
+            tr('Corrige dans le projet ouvert ce que le plugin sait corriger, '
+               'après confirmation, puis relance la validation.'))
+        self.btn_corriger.clicked.connect(self._corriger_dans_qgis)
+        self.btn_corriger.setVisible(False)
+        val_btns.addWidget(self.btn_corriger)
+        val_btns.addStretch()
+        btn_retour_fichiers = _btn(tr('Retour aux fichiers'), 'arrow-left',
+                                   _C_MUTED, _BTN_GHOST)
+        btn_retour_fichiers.clicked.connect(
+            lambda: self.sous_onglets.setCurrentIndex(0))
+        val_btns.addWidget(btn_retour_fichiers)
+        val_v.addLayout(val_btns)
+
+        defilement.setWidget(interieur)
+        pf.addWidget(defilement)
+        self.sous_onglets.addTab(page_fichiers, '  ' + tr('Gestionnaire de fichiers') + '  ')
+
+        # ══ Sous-onglet 2 — Valider un projet ═════════════════════════
+        page_validation = QWidget()
+        pv = QVBoxLayout(page_validation)
+        pv.setContentsMargins(10, 14, 10, 10)
+        pv.setSpacing(8)
+
+        self.grp_validation.setVisible(True)   # la page entiere lui revient
+        pv.addWidget(self.grp_validation, 1)
+        self.sous_onglets.addTab(page_validation, '  ' + tr('Valider un projet') + '  ')
+
         return tab
 
     # ── Onglet Upload ────────────────────────────────────────────────
@@ -1662,7 +2205,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         v.setContentsMargins(10, 14, 10, 10)
         v.setSpacing(8)
 
-        grp = QGroupBox('Uploader un dossier vers l\'instance')
+        grp = QGroupBox(tr('Uploader un dossier vers l\'instance'))
         f   = QFormLayout(grp)
         f.setSpacing(12)
         f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1670,7 +2213,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         local_row = QHBoxLayout()
         local_row.setSpacing(6)
         self.txt_local = QLineEdit()
-        self.txt_local.setPlaceholderText('Sélectionner un dossier local…')
+        self.txt_local.setPlaceholderText(tr('Sélectionner un dossier local…'))
         self.txt_local.setReadOnly(True)
         btn_browse = QPushButton()
         btn_browse.setIcon(_icon('folder', _C_MUTED, 15))
@@ -1679,15 +2222,15 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         btn_browse.clicked.connect(self._browse_folder)
         local_row.addWidget(self.txt_local)
         local_row.addWidget(btn_browse)
-        f.addRow(_form_label('Dossier local'), local_row)
+        f.addRow(_form_label(tr('Dossier local')), local_row)
 
         self.txt_remote = QLineEdit('/')
         self.txt_remote.setReadOnly(True)
-        self.txt_remote.setPlaceholderText('Sélectionnez un dossier local')
-        f.addRow(_form_label('Destination'), self.txt_remote)
+        self.txt_remote.setPlaceholderText(tr('Sélectionnez un dossier local'))
+        f.addRow(_form_label(tr('Destination')), self.txt_remote)
         v.addWidget(grp)
 
-        self.btn_upload = _btn('Uploader le dossier', 'upload-cloud', 'white', _BTN_PRIMARY)
+        self.btn_upload = _btn(tr('Uploader le dossier'), 'upload-cloud', 'white', _BTN_PRIMARY)
         self.btn_upload.clicked.connect(self._do_upload_folder)
         v.addWidget(self.btn_upload)
 
@@ -1736,8 +2279,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         info_ico.setFixedSize(16, 16)
         info_ico.setStyleSheet('background: transparent;')
         info_lbl = QLabel(
-            'Double-cliquez sur une table pour l\'ajouter comme couche dans QGIS.\n'
-            'Connexion directe : QGIS → PostgreSQL de votre instance.'
+            tr('Double-cliquez sur une table pour l\'ajouter comme couche dans QGIS.\n'
+            'Connexion directe : QGIS → PostgreSQL de votre instance.')
         )
         info_lbl.setWordWrap(True)
         info_lbl.setStyleSheet(
@@ -1763,10 +2306,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         pu_ico.setPixmap(_icon('alert-triangle', _C_WARN, 16).pixmap(16, 16))
         pu_ico.setFixedSize(16, 16)
         pu_ico.setStyleSheet('background: transparent;')
-        pu_lbl = QLabel(
-            'PostGIS non disponible pour cette instance.\n'
+        pu_lbl = self.lbl_pg_indispo = QLabel(
+            tr('PostGIS non disponible pour cette instance.\n'
             'L\'instance doit être déployée avec une base de données PostgreSQL/PostGIS\n'
-            'pour utiliser cette fonctionnalité.'
+            'pour utiliser cette fonctionnalité.')
         )
         pu_lbl.setWordWrap(True)
         pu_lbl.setStyleSheet(
@@ -1779,7 +2322,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         v.addWidget(self.pg_unavailable)
 
         self.lst_pg = QTreeWidget()
-        self.lst_pg.setHeaderLabels(['Table', 'Schéma', 'Géométrie', 'SRID'])
+        self.lst_pg.setHeaderLabels([tr('Table'), tr('Schéma'), tr('Géométrie'), tr('SRID')])
         self.lst_pg.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.lst_pg.setAlternatingRowColors(True)
         self.lst_pg.setMinimumHeight(150)
@@ -1802,18 +2345,18 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         bloc_tables_v.addWidget(self.lst_pg, 1)
 
         btns = QHBoxLayout()
-        self.btn_load_pg = _btn('Charger les tables', 'refresh', _C_PRIMARY, _BTN_GHOST)
+        self.btn_load_pg = _btn(tr('Charger les tables'), 'refresh', _C_PRIMARY, _BTN_GHOST)
         self.btn_load_pg.clicked.connect(self._load_postgis_tables)
-        self.btn_add_pg = _btn('Ajouter à QGIS', 'plus-circle', 'white', _BTN_SUCCESS)
+        self.btn_add_pg = _btn(tr('Ajouter à QGIS'), 'plus-circle', 'white', _BTN_SUCCESS)
         self.btn_add_pg.setEnabled(False)
         self.btn_add_pg.clicked.connect(
             lambda: self._add_postgis_layer(self.lst_pg.currentItem())
         )
-        self.btn_diag_pg = _btn('Diagnostiquer la base', 'activity',
+        self.btn_diag_pg = _btn(tr('Diagnostiquer la base'), 'activity',
                                 _C_PRIMARY, _BTN_GHOST)
         self.btn_diag_pg.setToolTip(
-            'Analyse la base sans rien y modifier : index manquants, '
-            'statistiques périmées, géométries trop détaillées…'
+            tr('Analyse la base sans rien y modifier : index manquants, '
+            'statistiques périmées, géométries trop détaillées…')
         )
         self.btn_diag_pg.clicked.connect(self._do_diagnostic_db)
         btns.addWidget(self.btn_load_pg)
@@ -1825,7 +2368,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         # ── Section Import dans PostGIS ──────────────────────────
         # ── Santé de la base ──────────────────────────────────────
-        self.grp_sante = QGroupBox('Santé de la base')
+        self.grp_sante = QGroupBox(tr('Santé de la base'))
         self.grp_sante.setVisible(False)
         sante_v = QVBoxLayout(self.grp_sante)
         sante_v.setSpacing(8)
@@ -1836,7 +2379,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         sante_v.addWidget(self.lbl_sante)
 
         self.lst_sante = QTreeWidget()
-        self.lst_sante.setHeaderLabels(['Table', 'Problème', 'Correction', 'Détail'])
+        self.lst_sante.setHeaderLabels([tr('Table'), tr('Problème'), tr('Correction'), tr('Détail')])
         entete = self.lst_sante.header()
         # Les trois premieres colonnes s'ajustent a leur contenu, sans quoi
         # « Index spatial manquant » s'affichait « Index spatia… ».
@@ -1851,22 +2394,22 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         sante_v.addWidget(self.lst_sante, 1)
 
         sante_btns = QHBoxLayout()
-        self.btn_optim_sel = _btn('Optimiser la sélection', 'zap',
+        self.btn_optim_sel = _btn(tr('Optimiser la sélection'), 'zap',
                                   _C_PRIMARY, _BTN_GHOST)
         self.btn_optim_sel.setEnabled(False)
         self.btn_optim_sel.clicked.connect(
             lambda: self._do_optimiser_db(selection_seule=True)
         )
-        self.btn_optim_pg = _btn('Tout optimiser', 'zap', 'white', _BTN_SUCCESS)
+        self.btn_optim_pg = _btn(tr('Tout optimiser'), 'zap', 'white', _BTN_SUCCESS)
         self.btn_optim_pg.setEnabled(False)
         self.btn_optim_pg.clicked.connect(
             lambda: self._do_optimiser_db(selection_seule=False)
         )
-        self.btn_export_sante = _btn('Exporter', 'download',
+        self.btn_export_sante = _btn(tr('Exporter'), 'download',
                                      _C_MUTED, _BTN_GHOST)
         self.btn_export_sante.setEnabled(False)
         self.btn_export_sante.setToolTip(
-            'Enregistrer le diagnostic : rapport CSV, ou script SQL rejouable'
+            tr('Enregistrer le diagnostic : rapport CSV, ou script SQL rejouable')
         )
         self.btn_export_sante.clicked.connect(self._do_exporter_sante)
         sante_btns.addWidget(self.btn_optim_sel)
@@ -1876,26 +2419,26 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         sante_v.addLayout(sante_btns)
         self.sections_pg.addWidget(self.grp_sante)
 
-        import_grp = QGroupBox('Importer une couche dans PostGIS')
+        import_grp = QGroupBox(tr('Importer une couche dans PostGIS'))
         ig = QVBoxLayout(import_grp)
         ig.setSpacing(8)
         ig.setContentsMargins(12, 14, 12, 12)
 
         # Ligne 1 : Couche QGIS
-        lbl_layer = QLabel('Couche QGIS')
+        lbl_layer = QLabel(tr('Couche QGIS'))
         lbl_layer.setStyleSheet(f'font-size: 12px; font-weight: 500; color: {_C_MUTED};')
         ig.addWidget(lbl_layer)
         layer_row = QHBoxLayout()
         layer_row.setSpacing(6)
         self.cmb_import_layer = QComboBox()
-        self.cmb_import_layer.setView(QListView())
+        _liste_deroulante(self.cmb_import_layer)
         self.cmb_import_layer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.cmb_import_layer.setMinimumWidth(0)
         self.cmb_import_layer.currentIndexChanged.connect(self._on_import_layer_changed)
         btn_refresh_layers = QPushButton()
         btn_refresh_layers.setIcon(_icon('refresh', _C_MUTED, 15))
         btn_refresh_layers.setIconSize(QSize(15, 15))
-        btn_refresh_layers.setToolTip('Rafraîchir la liste des couches')
+        btn_refresh_layers.setToolTip(tr('Rafraîchir la liste des couches'))
         btn_refresh_layers.setStyleSheet(_BTN_ICON)
         btn_refresh_layers.clicked.connect(self._refresh_import_layers)
         layer_row.addWidget(self.cmb_import_layer, 1)
@@ -1908,10 +2451,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         schema_col = QVBoxLayout()
         schema_col.setSpacing(3)
-        lbl_schema = QLabel('Schéma')
+        lbl_schema = QLabel(tr('Schéma'))
         lbl_schema.setStyleSheet(f'font-size: 12px; font-weight: 500; color: {_C_MUTED};')
         self.txt_import_schema = QLineEdit()
-        self.txt_import_schema.setPlaceholderText('schéma cible')
+        self.txt_import_schema.setPlaceholderText(tr('schéma cible'))
         self.txt_import_schema.textChanged.connect(
             lambda _t: self._sync_pg_buttons()
         )
@@ -1921,7 +2464,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         table_col = QVBoxLayout()
         table_col.setSpacing(3)
-        lbl_table = QLabel('Table')
+        lbl_table = QLabel(tr('Table'))
         lbl_table.setStyleSheet(f'font-size: 12px; font-weight: 500; color: {_C_MUTED};')
         self.txt_import_table = QLineEdit()
         self.txt_import_table.setPlaceholderText('nom_table')
@@ -1935,11 +2478,11 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         ig.addLayout(schema_table_row)
 
         # Bouton import (dans le GroupBox, pleine largeur)
-        self.btn_import_pg = _btn('Importer dans PostGIS', 'upload', 'white', _BTN_PRIMARY)
+        self.btn_import_pg = _btn(tr('Importer dans PostGIS'), 'upload', 'white', _BTN_PRIMARY)
         self.btn_import_pg.setEnabled(False)
         self.btn_import_pg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.btn_import_pg.setToolTip(
-            'Envoyer la couche sélectionnée dans la base PostGIS de l\'instance'
+            tr('Envoyer la couche sélectionnée dans la base PostGIS de l\'instance')
         )
         self.btn_import_pg.clicked.connect(self._do_import_to_postgis)
         ig.addWidget(self.btn_import_pg)
@@ -1956,19 +2499,85 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     # Actions — Connexion
     # ══════════════════════════════════════════════════════════════════
 
-    def _do_login(self):
-        email    = self.txt_email.text().strip()
-        password = self.txt_pwd.text()
-        if not email or not password:
-            self._log('Email et mot de passe requis.', 'warn')
+    def _mode_entreprise(self):
+        return self.cmb_serveur.currentData() == 'entreprise'
+
+    def _sync_support(self):
+        """Le bouton de support mène au support de LizPack, ou, sur le
+        portail d'une organisation, à celui qu'elle a renseigné (adresse
+        web, sinon courriel). Sans contact renseigné, la ligne disparaît :
+        renvoyer vers LizPack les utilisateurs d'un serveur qu'il
+        n'administre pas les mettrait dans une impasse."""
+        if not self._mode_entreprise():
+            self._support_url = _SUPPORT_URL
+            self.btn_support.setText(tr('Contacter le support'))
+            self.btn_support.setToolTip('')
+            self.ligne_support.setVisible(True)
             return
+        b = getattr(self.session, 'branding', None) or {}
+        url = (b.get('support_url') or '').strip()
+        courriel = (b.get('support_email') or '').strip()
+        tel = (b.get('support_phone') or '').strip()
+        if url and not url.lower().startswith(('http://', 'https://')):
+            url = 'https://' + url
+        cible = url or (('mailto:' + courriel) if courriel else '')
+        self.ligne_support.setVisible(bool(cible))
+        if not cible:
+            return
+        self._support_url = cible
+        org = (b.get('company_name') or b.get('brand_name') or '').strip()
+        self.btn_support.setText(tr('Contacter le support de {0}', org) if org
+                                 else tr('Contacter le support'))
+        self.btn_support.setToolTip(' · '.join(x for x in (url, courriel, tel) if x))
+
+    def _sync_mode_serveur(self):
+        """Montre les champs du serveur choisi, et eux seuls."""
+        ent = self._mode_entreprise()
+        if hasattr(self, 'ligne_support'):
+            self._sync_support()
+        for lbl in (self.lbl_email, self.lbl_pwd):
+            lbl.parentWidget().setVisible(not ent)
+        for lbl in (self.lbl_portail, self.lbl_jeton, self.lbl_certificat):
+            lbl.parentWidget().setVisible(ent)
+        # Pas de changement de serveur en pleine session.
+        self.cmb_serveur.setEnabled(not self.session.is_authenticated())
+
+    def _choisir_certificat(self):
+        chemin, _ = QFileDialog.getOpenFileName(
+            self, tr("Certificat de l'autorité de certification"), '',
+            tr('Certificats (*.pem *.crt *.cer);;Tous les fichiers (*)'))
+        if chemin:
+            self.txt_certificat.setText(chemin)
+
+    def _do_login(self):
+        if self._mode_entreprise():
+            adresse = normaliser_adresse(self.txt_portail.text())
+            jeton = self.txt_jeton.text().strip()
+            certificat = self.txt_certificat.text().strip()
+            if not adresse or not jeton:
+                self._log(tr("Adresse du portail et jeton d'API requis."), 'warn')
+                return
+            if certificat and not os.path.isfile(certificat):
+                self._log(tr('Certificat introuvable : {}').format(certificat), 'warn')
+                return
+            self.txt_portail.setText(adresse)
+            self.session = SessionEntreprise(adresse, certificat)
+            email, password = '', jeton
+        else:
+            email    = self.txt_email.text().strip()
+            password = self.txt_pwd.text()
+            if not email or not password:
+                self._log(tr('Email et mot de passe requis.'), 'warn')
+                return
+            if getattr(self.session, 'entreprise', False):
+                self.session = LizpackSession()
         self.btn_login.setEnabled(False)
-        self.btn_login.setText('Connexion…')
-        self._log('Authentification en cours…')
+        self.btn_login.setText(tr('Connexion…'))
+        self._log(tr('Authentification en cours…'))
         self._login_worker = LoginWorker(self.session, email, password)
         self._login_worker.finished.connect(self._on_login_success)
         self._login_worker.error.connect(self._on_login_error)
-        self._start_loading('Authentification…')
+        self._start_loading(tr('Authentification…'))
         self._login_worker.finished.connect(lambda _: self._stop_loading())
         self._login_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._login_worker)
@@ -1979,7 +2588,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         equipes = getattr(self.session, 'memberships', []) or []
         self.cmb_espace.blockSignals(True)
         self.cmb_espace.clear()
-        self.cmb_espace.addItem('Mon compte', userData=None)
+        self.cmb_espace.addItem(tr('Mon compte'), userData=None)
         for equipe in equipes:
             nom = equipe.get('owner_name') or equipe.get('owner_email') or '?'
             role = equipe.get('role_display') or equipe.get('role') or ''
@@ -1988,11 +2597,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self.cmb_espace.blockSignals(False)
 
         visible = bool(equipes)
-        self.lbl_espace.setVisible(visible)
-        self.cmb_espace.setVisible(visible)
+        self.lbl_espace.parentWidget().setVisible(visible)
         if visible:
             self._log(
-                f'{len(equipes)} espace(s) partagé(s) disponible(s).', 'ok',
+                tr('{0} espace(s) partagé(s) disponible(s).', len(equipes)), 'ok',
             )
 
     def _on_espace_change(self, _index):
@@ -2003,7 +2611,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._reset_instance_state()
         self.session.set_team_context(owner)
         nom = self.cmb_espace.currentText()
-        self._log(f'Espace : {nom}…')
+        self._log(tr('Espace : {0}…', nom))
         self._recharger_instances()
 
     def _recharger_instances(self):
@@ -2015,7 +2623,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._espace_worker = ListeInstancesWorker(self.session)
         self._espace_worker.finished.connect(self._on_instances_rechargees)
         self._espace_worker.error.connect(lambda e: self._log(e, 'error'))
-        self._start_loading('Chargement des instances…')
+        self._start_loading(tr('Chargement des instances…'))
         self._espace_worker.finished.connect(lambda _: self._stop_loading())
         self._espace_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._espace_worker)
@@ -2025,6 +2633,12 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         """Meme traitement qu'apres une authentification, sans la refaire."""
         self._remplir_instances(instances)
         self._appliquer_permissions()
+
+    def _refus_jeton_lecture(self):
+        if self._jeton_lecture:
+            self._log(_MSG_JETON_LECTURE, 'warn')
+            return True
+        return False
 
     def _appliquer_permissions(self):
         """Bride l'interface sur ce que le serveur autorise.
@@ -2044,11 +2658,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if getattr(self.session, 'team_owner_id', None):
             nom_espace = self.cmb_espace.currentText()
         self.lbl_fichiers_interdits.setText(
-            'Cet espace ne vous donne pas accès aux fichiers.\n'
-            f"Le rôle qui vous est attribué{f' dans « {nom_espace} »' if nom_espace else ''} "
-            'ne comprend pas la gestion des fichiers — ni la consultation, '
-            'ni le téléchargement. Demandez la permission au propriétaire '
-            "de l'espace."
+            tr("Cet espace ne vous donne pas accès aux fichiers.\nLe rôle qui vous est attribué{0} ne comprend pas la gestion des fichiers : ni la consultation, ni le téléchargement. Demandez la permission au propriétaire de l'espace.", f' dans « {nom_espace} »' if nom_espace else '')
         )
         self.fichiers_interdits.setVisible(not acces_fichiers)
         self.tree.setVisible(acces_fichiers)
@@ -2063,28 +2673,72 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             if not acces_fichiers:
                 bouton.setEnabled(False)
                 bouton.setToolTip(
-                    'Cet espace ne vous donne pas accès aux fichiers.'
+                    tr('Cet espace ne vous donne pas accès aux fichiers.')
                 )
 
+        # Jeton d'API en lecture seule (serveur de son organisation) : on
+        # parcourt, ouvre et valide ; rien ne s'écrit sur le serveur.
+        self._jeton_lecture = acces_fichiers and not getattr(self.session, 'ecriture', True)
+        if self._jeton_lecture:
+            for bouton in (self.btn_upload_here, self.btn_upload_folder_here,
+                           self.btn_mkdir, self.btn_delete, self.btn_rename,
+                           self.btn_publish, self.btn_upload):
+                bouton.setEnabled(False)
+                bouton.setToolTip(_MSG_JETON_LECTURE)
+            self._log(tr('{0} Vous pouvez parcourir, ouvrir et valider les projets.', _MSG_JETON_LECTURE), 'warn')
+        elif acces_fichiers:
+            # Session précédente en lecture seule : ce qu'elle avait grisé
+            # ne se rallumait jamais (Upload restait désactivé).
+            for bouton in (self.btn_upload_here, self.btn_upload_folder_here,
+                           self.btn_mkdir, self.btn_upload):
+                bouton.setEnabled(True)
+                bouton.setToolTip('')
+            for bouton in (self.btn_delete, self.btn_rename, self.btn_publish):
+                bouton.setToolTip('')
+
         # L'onglet Upload n'a plus rien a offrir non plus.
-        self.tabs.setTabEnabled(2, acces_fichiers)
+        self.tabs.setTabEnabled(2, acces_fichiers and not self._jeton_lecture)
         if not acces_fichiers and self.session.permissions:
             self._log(
-                'Cet espace ne vous donne pas accès aux fichiers : '
+                tr('Cet espace ne vous donne pas accès aux fichiers : '
                 "l'onglet Projets et l'onglet Upload sont désactivés. "
-                "L'onglet PostGIS reste disponible.",
+                "L'onglet PostGIS reste disponible."),
                 'warn',
             )
 
     def _on_login_success(self, instances):
-        self.btn_login.setText('Se connecter')
+        self.btn_login.setText(tr('Se connecter'))
+        self._sync_support()
+        reglages = QSettings()
+        reglages.setValue(_MODE_CLE, self.cmb_serveur.currentData())
+        if self._mode_entreprise():
+            reglages.setValue(_PORTAIL_CLE, self.txt_portail.text().strip())
+            reglages.setValue(_CERTIFICAT_CLE, self.txt_certificat.text().strip())
+            moi = getattr(self.session, 'moi', {}) or {}
+            if moi.get('username'):
+                self._log(tr('Connecté au portail : {}.').format(moi['username']), 'ok')
+        self._sync_mode_serveur()
         if self.chk_souvenir.isChecked():
-            self._enregistrer_identifiants(
-                self.txt_email.text().strip(), self.txt_pwd.text()
-            )
-        self._log(f'{len(instances)} instance(s) disponible(s).', 'ok')
+            if self._mode_entreprise():
+                self._enregistrer_identifiants(
+                    self.txt_portail.text().strip(), self.txt_jeton.text().strip(),
+                    _AUTHCFG_JETON_CLE, enregistrer_email=False)
+            else:
+                self._enregistrer_identifiants(
+                    self.txt_email.text().strip(), self.txt_pwd.text()
+                )
+        if instances:
+            self._log(tr('{0} instance(s) disponible(s).', len(instances)), 'ok')
+        elif getattr(self.session, 'entreprise', False):
+            self._log(tr("Aucune instance ouverte à ce compte. Demandez à "
+                      "l'administrateur du portail de vous ouvrir une instance "
+                      '(fiche de l\'instance > Accès).'), 'warn')
+        else:
+            self._log(tr('Aucune instance sur ce compte.'), 'warn')
         self._peupler_espaces()
         self._remplir_instances(instances)
+        if not instances:
+            self.cmb_instance.setPlaceholderText(tr('Aucune instance accessible'))
         self.btn_logout.setEnabled(True)
         self.btn_login.setEnabled(False)
         self._appliquer_permissions()
@@ -2104,16 +2758,16 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             else:
                 dot = '○ '
             label_status = {
-                'RUNNING': 'En cours',
-                'STOPPED': 'Arrêtée',
-                'SUSPENDED_BILLING': 'Suspendue (abonnement)',
-                'SUSPENDED_QUOTA': 'Suspendue (quota)',
-                'SUSPENDED': 'Suspendue',
-                'DEPLOYING': 'Déploiement…',
-                'ERROR': 'Erreur',
+                'RUNNING': tr('En cours'),
+                'STOPPED': tr('Arrêtée'),
+                'SUSPENDED_BILLING': tr('Suspendue (abonnement)'),
+                'SUSPENDED_QUOTA': tr('Suspendue (quota)'),
+                'SUSPENDED': tr('Suspendue'),
+                'DEPLOYING': tr('Déploiement…'),
+                'ERROR': tr('Erreur'),
             }.get(status, status)
             self.cmb_instance.addItem(
-                f"{dot}{inst['name']}  ({label_status})", userData=inst
+                tr('{0}{1}  ({2})', dot, inst['name'], label_status), userData=inst
             )
         self.cmb_instance.blockSignals(False)
         self.grp_instance.setEnabled(True)
@@ -2124,7 +2778,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _on_login_error(self, msg):
         self.btn_login.setEnabled(True)
-        self.btn_login.setText('Se connecter')
+        self.btn_login.setText(tr('Se connecter'))
         self._log(msg.strip(), 'error')
 
     def _sync_connect_button(self):
@@ -2135,6 +2789,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         n'a pas change. Il redevient actif si l'utilisateur choisit une
         autre instance, ou apres une deconnexion.
         """
+        # Rafraichir n'a de sens qu'une fois connecte, et reste possible
+        # meme si la liste deroulante pointe ailleurs.
+        self.btn_rafraichir.setEnabled(self.session.is_connected())
+
         inst = self.cmb_instance.currentData()
         if not inst:
             self.btn_connect.setEnabled(False)
@@ -2147,58 +2805,90 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         )
         self.btn_connect.setEnabled(not deja_connecte)
         self.btn_connect.setToolTip(
-            f"Déjà connecté à « {inst['name']} » — "
-            'choisissez une autre instance pour changer.'
+            tr('Déjà connecté à « {0} » : choisissez une autre instance pour changer.', inst['name'])
             if deja_connecte else
-            f"Se connecter à « {inst['name']} »"
+            tr('Se connecter à « {0} »', inst['name'])
         )
+
+    def _do_rafraichir_connexion(self):
+        """Rejoue la connexion a l'instance deja connectee.
+
+        Les identifiants de la base, le quota et les permissions sont
+        lus au moment de la connexion : une modification faite depuis le
+        site ne parvenait au plugin qu'en se deconnectant. Rafraichir
+        redemande le tout sans changer d'instance.
+        """
+        if not self.session.is_connected():
+            self._log(tr('Aucune instance connectee.'), 'warn')
+            return
+
+        identifiant = self.session.instance_id
+        nom = self.session.instance_name
+        self.btn_rafraichir.setEnabled(False)
+        self._log(tr('Rafraîchissement de {}…').format(nom))
+
+        # Le cache de listage decrit l'etat d'avant : le garder ferait
+        # afficher les anciens fichiers apres un rafraichissement.
+        try:
+            self.session.clear_cache()
+        except Exception as e:
+            journal.ignorer(e, 'vidage du cache de listage')
+
+        self._connect_worker = ConnectInstanceWorker(
+            self.session, identifiant, nom)
+        self._connect_worker.finished.connect(self._on_instance_connected)
+        self._connect_worker.error.connect(self._on_instance_connect_error)
+        self._start_loading(tr('Rafraîchissement de {}…').format(nom))
+        self._connect_worker.finished.connect(lambda: self._stop_loading())
+        self._connect_worker.error.connect(lambda _: self._stop_loading())
+        self._suivre(self._connect_worker)
+        self._connect_worker.start()
 
     def _do_connect_instance(self):
         inst = self.cmb_instance.currentData()
         if not inst:
-            self._log('Sélectionnez une instance.', 'warn')
+            self._log(tr('Sélectionnez une instance.'), 'warn')
             return
 
         status = inst.get('status', '').upper()
         if status == 'SUSPENDED_BILLING':
             self._log(
-                'Cette instance est suspendue (abonnement expiré).\n'
+                tr('Cette instance est suspendue (abonnement expiré).\n'
                 'Renouvelez votre abonnement depuis votre espace client '
-                '(Facturation) pour réactiver l\'instance.',
+                '(Facturation) pour réactiver l\'instance.'),
                 'error',
             )
             return
         if status == 'SUSPENDED_QUOTA':
             self._log(
-                'Cette instance est suspendue (quota dépassé).\n'
+                tr('Cette instance est suspendue (quota dépassé).\n'
                 'Vous avez dépassé les limites de stockage de votre plan.\n'
                 'La base de données PostgreSQL reste accessible pour '
                 'vous permettre de libérer de l\'espace.\n'
                 'Supprimez des données puis vérifiez votre quota depuis '
-                'votre espace client.',
+                'votre espace client.'),
                 'error',
             )
             # On autorise la connexion pour que l'onglet PostGIS reste utilisable
             self._quota_suspended = True
         elif status == 'SUSPENDED':
             self._log(
-                'Cette instance est suspendue.\n'
+                tr('Cette instance est suspendue.\n'
                 'Vérifiez votre abonnement depuis votre espace client '
-                '(Facturation) pour réactiver l\'instance.',
+                '(Facturation) pour réactiver l\'instance.'),
                 'error',
             )
             return
         elif status == 'STOPPED':
             self._log(
-                'Cette instance est arrêtée.\n'
-                'Démarrez-la depuis votre tableau de bord avant de vous connecter.',
+                tr('Cette instance est arrêtée.\n'
+                'Démarrez-la depuis votre tableau de bord avant de vous connecter.'),
                 'warn',
             )
             return
         elif status not in ('RUNNING', 'DEPLOYING'):
             self._log(
-                f'Instance indisponible (statut : {status}).\n'
-                'Vérifiez son état depuis votre tableau de bord.',
+                tr('Instance indisponible (statut : {0}).\nVérifiez son état depuis votre tableau de bord.', status),
                 'warn',
             )
             return
@@ -2208,34 +2898,31 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         # Réinitialiser l'état de l'instance précédente si on change
         if self.session.is_connected():
             prev = self.session.instance_name
-            self._log(f'Déconnexion de « {prev} »…')
+            self._log(tr('Déconnexion de « {0} »…', prev))
             self._reset_instance_state()
 
         self.btn_connect.setEnabled(False)
-        self.btn_connect.setText('Connexion…')
-        self._log(f"Connexion à \"{inst['name']}\"…")
+        self.btn_connect.setText(tr('Connexion…'))
+        self._log(tr('Connexion à "{0}"…', inst['name']))
         self._connect_worker = ConnectInstanceWorker(
             self.session, inst['id'], inst['name']
         )
         self._connect_worker.finished.connect(self._on_instance_connected)
         self._connect_worker.error.connect(self._on_instance_connect_error)
-        self._start_loading(f"Connexion à \"{inst['name']}\"…")
+        self._start_loading(tr('Connexion à "{0}"…', inst['name']))
         self._connect_worker.finished.connect(lambda: self._stop_loading())
         self._connect_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._connect_worker)
         self._connect_worker.start()
 
     def _on_instance_connected(self):
-        self.btn_connect.setText("Connecter à l'instance")
+        self.btn_connect.setText(tr("Connecter à l'instance"))
         name = self.session.instance_name
-        self.lbl_instance_info.setText(f'Instance connectée : {name}')
-        self._log(f'Connecté à {name}', 'ok')
+        self.lbl_instance_info.setText(tr('Instance connectée : {0}', name))
+        self._log(tr('Connecté à {0}', name), 'ok')
         if getattr(self.session, 'metadata_error', ''):
             self._log(
-                'Informations de l\'instance indisponibles : '
-                f'{self.session.metadata_error}\n'
-                "L'onglet PostGIS restera vide et la publication ne pourra "
-                'pas réécrire les connexions du projet.',
+                tr("Informations de l'instance indisponibles : {0}.\nL'onglet PostGIS restera vide et la publication ne pourra pas réécrire les connexions du projet.", self.session.metadata_error.rstrip(".")),
                 'warn',
             )
         self._current_path = '/'
@@ -2249,7 +2936,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._load_files()
 
     def _on_instance_connect_error(self, msg):
-        self.btn_connect.setText("Connecter à l'instance")
+        self.btn_connect.setText(tr("Connecter à l'instance"))
         self._sync_connect_button()
         self._log(msg.strip(), 'error')
 
@@ -2259,7 +2946,23 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         pg = self.session.get_postgis_uri()
         if not all([pg['host'], pg['dbname'], pg['user']]):
             return
+        # Sans mot de passe (droit absent), la connexion échouerait dans
+        # l'explorateur : ne pas l'enregistrer.
+        if not pg.get('password'):
+            return
         conn_name = f'LizPack - {self.session.instance_name}'
+
+        # L'API du fournisseur d'abord : saveConnection() reecrit le groupe
+        # de reglages a partir de l'URI et perd les drapeaux d'enregistrement
+        # des identifiants. Ecrits avant, ils disparaissaient ; QGIS ne
+        # reutilisait alors ni l'utilisateur ni le mot de passe, et
+        # l'explorateur affichait « La connexion a echoue ».
+        self._prevenir_explorateur(conn_name, pg)
+
+        # Ne restent a ecrire que l'adresse, les identifiants et les deux
+        # drapeaux. `sslmode` est laisse tel que le fournisseur l'a pose : il
+        # attend le nom de la valeur, pas son rang, et ecrire 2 par-dessus
+        # « SslPrefer » rendait le reglage illisible.
         s = QSettings()
         prefix = f'PostgreSQL/connections/{conn_name}'
         s.setValue(f'{prefix}/host', pg['host'])
@@ -2269,10 +2972,15 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         s.setValue(f'{prefix}/password', pg['password'])
         s.setValue(f'{prefix}/saveUsername', True)
         s.setValue(f'{prefix}/savePassword', True)
-        s.setValue(f'{prefix}/sslmode', 2)  # prefer
         self._registered_pg_conn = conn_name
-        self._log(f'Connexion PostgreSQL « {conn_name} » enregistrée dans QGIS.', 'ok')
-        self._prevenir_explorateur(conn_name, pg)
+        self._log(tr('Connexion PostgreSQL « {0} » enregistrée dans QGIS.', conn_name), 'ok')
+        # L'explorateur ne reconstruit pas son arbre de lui-meme, et le
+        # plugin ne le forcera pas : reload() faisait tomber QGIS, refresh()
+        # sur ce noeud le fige le temps d'essayer chaque connexion, celles
+        # qui echouent comprises. Reste a le dire.
+        self._log(
+            tr("Pour la voir dans l'explorateur : clic droit sur PostgreSQL "
+            '→ Rafraîchir.'))
 
     def _prevenir_explorateur(self, nom, pg):
         """Signale a QGIS qu'une connexion PostgreSQL a change.
@@ -2314,6 +3022,30 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._registered_pg_conn = None
         self._prevenir_explorateur(conn_name, None)
 
+    def _oublier_connexions_pg(self):
+        """Retire toutes les connexions posees par le plugin.
+
+        `_unregister_qgis_pg_connection` ne connait que celle de la session
+        en cours : une connexion posee avant un redemarrage de QGIS, ou
+        avant un rechargement du plugin, n'etait plus reclamee par personne
+        et restait dans l'explorateur, morte — le mot de passe de son
+        instance ayant pu changer entre temps.
+
+        Toutes portent le meme prefixe, et c'est le plugin qui les ecrit :
+        les balayer a la deconnexion ne touche a rien d'autre.
+        """
+        reglages = QSettings()
+        reglages.beginGroup('PostgreSQL/connections')
+        noms = [n for n in reglages.childGroups() if n.startswith('LizPack - ')]
+        reglages.endGroup()
+        for nom in noms:
+            reglages.remove('PostgreSQL/connections/{}'.format(nom))
+            self._prevenir_explorateur(nom, None)
+        self._registered_pg_conn = None
+        if noms:
+            self._log(tr('{} connexion(s) PostgreSQL retirée(s) de QGIS.').format(
+                len(noms)))
+
     def _reset_instance_state(self):
         """Nettoie tout l'état lié à l'instance courante (fichiers, PostGIS, quota, chemins)."""
         self._unregister_qgis_pg_connection()
@@ -2332,7 +3064,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._clipboard_mode = 'copy'
         self._quota_suspended = False
         self.lbl_instance_info.setText('')
-        self.lbl_local_project.setText('Aucun projet ouvert dans QGIS')
+        self.lbl_local_project.setText(tr('Aucun projet ouvert dans QGIS'))
         self.lbl_local_project.setStyleSheet(
             f'font-size: 13px; color: {_C_MUTED}; font-style: italic;'
         )
@@ -2354,18 +3086,22 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _do_logout(self):
         self._reset_instance_state()
+        # La deconnexion emporte la base : laisser la connexion derriere soi
+        # promettait un acces que le plugin ne garantit plus.
+        self._oublier_connexions_pg()
         self._do_logout_nettoyage()
         self.session.logout()
         self.cmb_espace.clear()
-        self.lbl_espace.setVisible(False)
-        self.cmb_espace.setVisible(False)
+        self.lbl_espace.parentWidget().setVisible(False)
         self.cmb_instance.clear()
         self.grp_instance.setEnabled(False)
         self.btn_connect.setEnabled(False)
         self.btn_login.setEnabled(True)
         self.btn_logout.setEnabled(False)
         self._refresh_auth_state()
-        self._log('Déconnecté.')
+        self._sync_mode_serveur()
+        self._sync_support()
+        self._log(tr('Déconnecté.'))
 
     # ══════════════════════════════════════════════════════════════════
     # Actions — Projets
@@ -2374,12 +3110,12 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     def _do_open_project(self):
         item = self.tree.currentItem()
         if not item:
-            self._log('Sélectionnez un fichier dans la liste.', 'warn')
+            self._log(tr('Sélectionnez un fichier dans la liste.'), 'warn')
             return
         api_path = item.data(0, Qt.ItemDataRole.UserRole)
         file_id  = item.data(0, Qt.ItemDataRole.UserRole + 1)
         if not api_path or not api_path.lower().endswith(('.qgz', '.qgs')):
-            self._log('Sélectionnez un fichier .qgz ou .qgs.', 'warn')
+            self._log(tr('Sélectionnez un fichier .qgz ou .qgs.'), 'warn')
             return
         fname      = os.path.basename(api_path)
         server_dir = '/'.join(api_path.rstrip('/').split('/')[:-1]) or '/'
@@ -2388,22 +3124,22 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         # reviendrait a aspirer l'instance entiere : on previent avant.
         if server_dir == '/':
             rep = QMessageBox.question(
-                self, 'Télécharger tout le contenu ?',
-                "Ce projet est à la racine de l'instance.\n"
+                self, tr('Télécharger tout le contenu ?'),
+                tr("Ce projet est à la racine de l'instance.\n"
                 'Ouvrir revient à télécharger tout son contenu.\n\n'
-                'Continuer ?',
+                'Continuer ?'),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
             )
             if rep != QMessageBox.StandardButton.Yes:
-                self._log('Ouverture annulée.', 'warn')
+                self._log(tr('Ouverture annulée.'), 'warn')
                 return
 
         # Demander ou enregistrer, en repartant du repertoire de travail.
         dossier = QFileDialog.getExistingDirectory(
-            self, 'Où enregistrer le projet ?', self._repertoire_travail(),
+            self, tr('Où enregistrer le projet ?'), self._repertoire_travail(),
         )
         if not dossier:
-            self._log('Ouverture annulée.', 'warn')
+            self._log(tr('Ouverture annulée.'), 'warn')
             return
         self._definir_repertoire_travail(dossier)
 
@@ -2413,8 +3149,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         local_dir   = os.path.join(dossier, nom_dossier)
         local_path  = os.path.join(local_dir, fname)
         os.makedirs(local_dir, exist_ok=True)
-        self._log(f'Destination : {local_dir}')
-        self._log(f'Téléchargement de {fname} + données associées…')
+        self._log(tr('Destination : {0}', local_dir))
+        self._log(tr('Téléchargement de {0} + données associées…', fname))
         self.btn_open.setEnabled(False)
         self._dl_worker = DownloadProjectWorker(self.session, file_id, local_path, api_path)
         self._dl_worker.finished.connect(self._on_project_downloaded)
@@ -2422,21 +3158,85 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._dl_worker.error.connect(
             lambda e: (self._log(e, 'error'), self._sync_open_button())
         )
-        self._start_loading(f'Téléchargement de {fname}…')
+        self._start_loading(tr('Téléchargement de {0}…', fname))
         self._dl_worker.finished.connect(lambda _: self._stop_loading())
         self._dl_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._dl_worker)
         self._dl_worker.start()
 
+    def _authcfg_bd(self, pg):
+        """Range les identifiants de la base dans le magasin de QGIS.
+
+        Retourne l'identifiant de configuration a poser dans les couches,
+        ou une chaine vide si le magasin n'est pas disponible. La
+        configuration est reutilisee d'un projet a l'autre : son
+        identifiant doit rester stable, sans quoi les projets deja ouverts
+        pointeraient vers une configuration disparue.
+        """
+        reglages = QSettings()
+        cle = '{}/{}'.format(_AUTHCFG_BD_CLE, self.session.instance_name)
+        try:
+            gestionnaire = QgsApplication.authManager()
+            config = QgsAuthMethodConfig()
+            config.setName('LizPack — {} (base)'.format(self.session.instance_name))
+            config.setMethod('Basic')
+            config.setConfig('username', pg['user'])
+            config.setConfig('password', pg['password'])
+
+            ancien = reglages.value(cle, '') or ''
+            if ancien and ancien in gestionnaire.configIds():
+                config.setId(ancien)
+                if gestionnaire.updateAuthenticationConfig(config):
+                    return ancien
+            if gestionnaire.storeAuthenticationConfig(config):
+                reglages.setValue(cle, config.id())
+                return config.id()
+        except Exception as e:
+            journal.ignorer(e, "magasin d'authentification (base)")
+        return ''
+
+    def _relier_bd(self, chemin):
+        """Rebranche les couches PostGIS du projet sur la base de l'instance.
+
+        Un projet publie porte l'adresse interne de la base, celle que
+        Lizmap emploie depuis le serveur. Ouvert tel quel sur un poste de
+        travail, il ne joint rien : QGIS ouvre « Traiter les couches
+        inutilisables » et le projet arrive vide.
+        """
+        if not self.session.is_connected():
+            return
+        pg = self.session.get_postgis_uri()
+        if not (pg.get('host') and pg.get('dbname')):
+            return
+        authcfg = self._authcfg_bd(pg)
+        try:
+            compte = liaison_bd.relier(chemin, pg, authcfg)
+        except Exception as e:
+            self._log(tr('Couches PostGIS non rebranchées : {}').format(e), 'warn')
+            return
+        if not compte:
+            return
+        if authcfg:
+            self._log(
+                tr('{} couche(s) PostGIS rebranchée(s) sur la base de '
+                "l'instance.").format(compte), 'ok')
+        else:
+            self._log(
+                tr('{} couche(s) PostGIS rebranchée(s), mais le magasin '
+                "d'authentification de QGIS est indisponible : le mot de "
+                'passe de la base est écrit en clair dans le projet.').format(compte),
+                'warn')
+
     def _on_project_downloaded(self, local_path):
         self._sync_open_button()
-        self._log(f'Téléchargé → {local_path}', 'ok')
+        self._log(tr('Téléchargé → {0}', local_path), 'ok')
         item = self.tree.currentItem()
         self._open_project_api_path = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        self._relier_bd(local_path)
         ok = QgsProject.instance().read(local_path)
         if ok:
             fname = os.path.basename(local_path)
-            self._log(f'Projet ouvert : {fname}', 'ok')
+            self._log(tr('Projet ouvert : {0}', fname), 'ok')
             # Pré-remplir la section Publication
             self.lbl_local_project.setText(fname)
             self.lbl_local_project.setStyleSheet(
@@ -2445,7 +3245,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             if self._open_project_api_path:
                 self.txt_publish_dest.setText(self._open_project_api_path)
         else:
-            self._log('Impossible d\'ouvrir le projet dans QGIS.', 'error')
+            self._log(tr('Impossible d\'ouvrir le projet dans QGIS.'), 'error')
 
     def _sync_publish_button(self):
         """N'active « Publier » que si la publication peut aboutir.
@@ -2459,24 +3259,34 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         # Un espace partage en lecture seule prime sur tout le reste :
         # les fonctions de synchronisation ne doivent pas le contredire.
-        if self._lecture_seule:
+        # La validation n'ecrit rien : elle reste permise meme en lecture
+        # seule, et n'exige pas de destination.
+        self.btn_valider.setEnabled(projet_ouvert and connecte)
+        self.btn_valider.setToolTip(
+            tr('Fait examiner le projet par le serveur sans rien publier.')
+            if (projet_ouvert and connecte) else
+            (tr("Connectez-vous d'abord a une instance") if not connecte
+             else tr('Ouvrez un projet dans QGIS (Ctrl+O)'))
+        )
+
+        if self._lecture_seule or self._jeton_lecture:
             self.btn_publish.setEnabled(False)
             self.btn_publish.setToolTip(
-                'Lecture seule : cet espace ne vous accorde pas la '
-                'gestion des fichiers.'
+                tr('Lecture seule : cet espace ne vous accorde pas la '
+                'gestion des fichiers.')
             )
             return
 
         self.btn_publish.setEnabled(projet_ouvert and connecte and destination)
         if not connecte:
-            raison = "Connectez-vous d'abord à une instance"
+            raison = tr("Connectez-vous d'abord à une instance")
         elif not projet_ouvert:
-            raison = 'Ouvrez un projet dans QGIS (Ctrl+O) ou enregistrez-en un (Ctrl+S)'
+            raison = tr('Ouvrez un projet dans QGIS (Ctrl+O) ou enregistrez-en un (Ctrl+S)')
         elif not destination:
-            raison = 'Sélectionnez un fichier dans la liste pour fixer la destination'
+            raison = tr('Sélectionnez un fichier dans la liste pour fixer la destination')
         else:
-            raison = ('Sauvegarde le projet QGIS actif et le publie sur le serveur.\n'
-                      'Lizmap recharge automatiquement.')
+            raison = (tr('Sauvegarde le projet QGIS actif et le publie sur le serveur.\n'
+                      'Lizmap recharge automatiquement.'))
         self.btn_publish.setToolTip(raison)
 
     def _on_qgis_project_changed(self):
@@ -2484,7 +3294,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         project    = QgsProject.instance()
         local_path = project.fileName()
         if not local_path:
-            self.lbl_local_project.setText('Aucun projet ouvert dans QGIS')
+            self.lbl_local_project.setText(tr('Aucun projet ouvert dans QGIS'))
             self.lbl_local_project.setStyleSheet(
                 f'font-size: 13px; color: {_C_MUTED}; font-style: italic;'
             )
@@ -2497,20 +3307,381 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         )
         # Auto-suggestion de destination si champ vide
         if not self.txt_publish_dest.text():
-            self.txt_publish_dest.setText(f'/{fname}')
+            self._suggerer_destination()
         self._sync_publish_button()
 
-    def _check_quota_block(self, action='cette action'):
+    def _check_quota_block(self, action=None):
         """Retourne True (et log) si l'instance est suspendue pour quota."""
+        action = action or tr('cette action')
         if getattr(self, '_quota_suspended', False):
             self._log(
-                f'Impossible : {action}.\n'
-                'Votre instance est suspendue pour dépassement de quota.\n'
-                'Supprimez des fichiers ou des données pour libérer de l\'espace.',
+                tr("Impossible : {0}.\nVotre instance est suspendue pour dépassement de quota.\nSupprimez des fichiers ou des données pour libérer de l'espace.", action),
                 'error',
             )
             return True
         return False
+
+    # ══════════════════════════════════════════════════════════════════
+    # Validation d'un projet
+    # ══════════════════════════════════════════════════════════════════
+
+    _GRAVITES = (
+        ('bloquant',  tr('Bloquant'),  '#B91C1C'),
+        ('important', tr('Important'), '#B45309'),
+        ('remarque',  tr('Remarque'),  _C_MUTED),
+    )
+
+    def _valider_selection(self):
+        """Valide le projet selectionne dans l'arbre, la ou il est."""
+        item = self.tree.currentItem()
+        if not item:
+            return
+        chemin = item.data(0, Qt.ItemDataRole.UserRole) or ''
+        if chemin.lower().endswith('.qgz'):
+            self._log(
+                tr('Le validateur du serveur attend un projet .qgs. '
+                'Ouvrez ce projet, puis validez-le depuis QGIS.'), 'warn')
+            return
+        self._do_valider_projet(
+            file_id=item.data(0, Qt.ItemDataRole.UserRole + 1),
+            nom=os.path.basename(chemin))
+
+    def _do_valider_projet(self, file_id=None, nom=None):
+        """Fait examiner un projet par le serveur, sans rien publier.
+
+        Le televersement previent deja des defauts qu'il rencontre, mais il
+        le fait au moment ou le projet part en ligne — trop tard pour y
+        renoncer. Ici, rien n'est ecrit ni publie : le serveur lit le
+        fichier en memoire et rend l'etat des lieux.
+        """
+        if not self.session.is_connected():
+            self._log(tr("Connectez-vous d'abord a une instance."), 'warn')
+            return
+
+        chemin_local = None
+        self._rapport_local = file_id is None
+        if file_id is None:
+            projet = QgsProject.instance()
+            chemin_local = projet.fileName()
+            if not chemin_local:
+                self._log(
+                    tr('Aucun projet QGIS ouvert. Ouvrez un projet (Ctrl+O), ou '
+                    'selectionnez-en un dans la liste, clic droit, '
+                    'Valider le projet.'), 'warn')
+                return
+            # Valider ce qui est a l'ecran, pas ce qui reste sur le disque.
+            if not projet.write():
+                self._log(tr('Echec de la sauvegarde locale du projet.'), 'error')
+                return
+            nom = os.path.basename(chemin_local)
+
+        self.btn_valider.setEnabled(False)
+        self._log(tr('Validation de {}...').format(nom))
+        self._start_loading(tr('Validation de {}...').format(nom))
+        self._val_worker = ValidationWorker(self.session, chemin_local, file_id)
+        self._val_worker.finished.connect(self._on_rapport_validation)
+        self._val_worker.error.connect(
+            lambda e: (self._log(tr('Validation : {}').format(e), 'error'),
+                       self._sync_publish_button())
+        )
+        self._val_worker.finished.connect(lambda _: self._stop_loading())
+        self._val_worker.error.connect(lambda _: self._stop_loading())
+        self._suivre(self._val_worker)
+        self._val_worker.start()
+
+    def _on_rapport_validation(self, rapport):
+        self._sync_publish_button()
+        resume = rapport.get('resume') or {}
+        conforme = rapport.get('connexions_conformes', True)
+
+        if not sum(resume.values()) and conforme:
+            self._log(tr('Projet valide : aucun signalement.'), 'ok')
+        else:
+            self._log(
+                tr('Validation : {} bloquant(s), {} important(s), {} remarque(s).')
+                .format(resume.get('bloquant', 0), resume.get('important', 0),
+                        resume.get('remarque', 0)),
+                'error' if (resume.get('bloquant') or not conforme) else 'warn',
+                deployer=False)
+        self._afficher_rapport(rapport)
+
+    def _afficher_rapport(self, rapport):
+        """Remplit le panneau de validation, classe par gravite."""
+        resume = rapport.get('resume') or {}
+        erreurs = rapport.get('erreurs_connexion') or []
+
+        if erreurs:
+            self.lbl_validation.setText(
+                '<b style="color:#B91C1C;">' + tr('Les connexions PostgreSQL ne sont '
+                'pas conformes : la publication sera refusée.') + '</b><br>'
+                + '<br>'.join(str(e) for e in erreurs))
+        elif not sum(resume.values()):
+            self.lbl_validation.setText(
+                tr('<b style="color:{};">Aucun signalement.</b> Le projet peut '
+                'être publié.').format(_C_SUCCESS_TX))
+        else:
+            self.lbl_validation.setText(
+                tr('Deux règles seules font refuser le dépôt : des couches en '
+                '<b>projections mélangées</b>, et des <b>connexions '
+                "PostgreSQL</b> étrangères à l'instance. Les autres "
+                'signalements dégradent la carte sans interdire la publication.'))
+
+        self.lst_validation.clear()
+        self.txt_validation.clear()
+
+        par_gravite = {}
+        for signalement in rapport.get('signalements') or []:
+            par_gravite.setdefault(
+                signalement.get('severite'), []).append(signalement)
+
+        for cle, libelle, couleur in self._GRAVITES:
+            lot = par_gravite.get(cle) or []
+            if not lot:
+                continue
+            parent = QTreeWidgetItem(
+                self.lst_validation, ['{} ({})'.format(libelle, len(lot)), '', ''])
+            parent.setForeground(0, QColor(couleur))
+            police = parent.font(0)
+            police.setBold(True)
+            parent.setFont(0, police)
+            for signalement in lot:
+                enfant = QTreeWidgetItem(parent, [
+                    signalement.get('couche') or '·',
+                    signalement.get('categorie') or '',
+                    signalement.get('constat') or '',
+                ])
+                enfant.setData(0, Qt.ItemDataRole.UserRole, signalement)
+            parent.setExpanded(True)
+
+        # Sans signalement, la table n'a rien a montrer : la ligne d'en-tete
+        # suffit, et le panneau reste court.
+        vide = not sum(resume.values())
+        self._sync_bouton_corriger(vide)
+        self.lst_validation.setVisible(not vide)
+        self.txt_validation.setVisible(not vide)
+
+        self.lst_validation.resizeColumnToContents(0)
+        self.lst_validation.resizeColumnToContents(1)
+        # Le rapport est demande : on va le montrer, pas l'attendre.
+        self.tabs.setCurrentIndex(1)
+        self.sous_onglets.setCurrentIndex(1)
+
+    def _sync_bouton_corriger(self, rapport_vide=False):
+        """« Corriger dans QGIS » : seulement pour le projet ouvert, et s'il
+        y a quelque chose que le plugin sait corriger."""
+        from . import corrections
+        montrer = False
+        if getattr(self, '_rapport_local', False) and not rapport_vide:
+            try:
+                montrer = bool(corrections.plan(QgsProject.instance()))
+            except Exception as e:  # noqa: BLE001
+                journal.ignorer(e, 'plan des corrections')
+        self.btn_corriger.setVisible(montrer)
+
+    def _corriger_dans_qgis(self):
+        """Propose les corrections possibles, les applique, enregistre le
+        projet et relance la validation."""
+        from . import corrections
+        projet = QgsProject.instance()
+        lot = corrections.plan(projet)
+        if not lot:
+            self._log(tr('Rien que le plugin sache corriger dans ce projet.'), 'info')
+            self.btn_corriger.setVisible(False)
+            return
+        texte = tr('Le plugin va faire ces corrections dans le projet ouvert :') + '\n\n'
+        texte += '\n'.join('· ' + c.description for c in lot)
+        if any(c.modifie_donnees for c in lot):
+            texte += '\n\n' + tr('Certaines modifient les données (fichiers ou tables '
+                                   'de la base), pas seulement le projet.')
+        texte += '\n\n' + tr('Le projet est ensuite enregistré, puis validé de nouveau. Continuer ?')
+        rep = QMessageBox.question(self, tr('Corriger dans QGIS'), texte)
+        if rep != QMessageBox.StandardButton.Yes:
+            return
+        self._start_loading(tr('Correction du projet…'))
+        faites = 0
+        try:
+            for c in lot:
+                try:
+                    c.appliquer()
+                    faites += 1
+                    self._log('✓ ' + c.description, 'success')
+                except Exception as e:  # noqa: BLE001
+                    self._log(tr('Échec : {0} ({1})', c.description, e), 'error')
+            if not projet.write():
+                self._log(tr('Echec de la sauvegarde locale du projet.'), 'error')
+                return
+        finally:
+            self._stop_loading()
+        self._log(tr('{0} correction(s) sur {1} appliquée(s).', faites, len(lot)),
+                  'success' if faites == len(lot) else 'warn')
+        self._do_valider_projet()
+
+    def _montrer_signalement(self):
+        """Detaille le signalement choisi dans le panneau."""
+        item = self.lst_validation.currentItem()
+        donnees = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        if not donnees:
+            self.txt_validation.clear()
+            return
+        self.txt_validation.setPlainText(
+            tr('{}\n\nConséquence : {}\n\nSolution : {}').format(
+                donnees.get('constat', ''),
+                donnees.get('consequence', '') or '·',
+                donnees.get('solution', '') or '·'))
+
+    def _verifier_projections_avant_publication(self):
+        """Propose de ramener les couches dans une projection unique.
+
+        Le serveur refuse un projet dont les couches ne partagent pas le meme
+        systeme de coordonnees. Le decouvrir apres coup, par un message de
+        refus, obligerait l'utilisateur a tout reprendre a la main dans QGIS :
+        autant le lui proposer ici, ou la reprojection est possible.
+
+        Rend True si la publication peut se poursuivre.
+        """
+        from . import reprojection
+
+        projet = QgsProject.instance()
+        try:
+            cible, divergentes, en_base = reprojection.couches_a_reprojeter(projet)
+        except Exception as e:  # noqa: BLE001
+            journal.ignorer(e, 'controle des projections avant publication')
+            return True          # ne jamais bloquer sur le controle lui-meme
+
+        # Une table PostGIS se reprojette en base, pas en l'exportant vers un
+        # fichier : le plugin le dit, et laisse la main.
+        if en_base:
+            noms_base = ', '.join(f'« {c.name()} »' for c in en_base)
+            self._log(
+                tr('{0} couche(s) PostGIS ne sont pas en {1} : {2}. Reprojetez-les dans la base (le rapport de validation donne la commande), puis republiez.', len(en_base), cible, noms_base), 'warn')
+            return False
+
+        if not divergentes:
+            return True
+
+        noms = ', '.join(f'« {c.name()} »' for c in divergentes[:4])
+        if len(divergentes) > 4:
+            noms += tr(' et {0} autre(s)', len(divergentes) - 4)
+
+        reponse = QMessageBox.question(
+            self,
+            tr('Projections différentes'),
+            tr('{0} couche(s) ne sont pas dans le systeme de coordonnees {1} : {2}.\n\nLe serveur refusera ce projet : chaque couche divergente serait reprojetee a chaque affichage, pour chaque visiteur de la carte.\n\nReprojeter ces couches en {3} maintenant ?\nLe projet et ses fichiers de donnees sont modifies sur place ; une sauvegarde « .bak » de chacun est posee a cote.', len(divergentes), cible, noms, cible),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reponse != QMessageBox.StandardButton.Yes:
+            self._log(
+                tr('Publication annulée : les couches doivent partager le même '
+                'système de coordonnées.'), 'warn')
+            return False
+
+        self._start_loading(tr('Reprojection des couches…'))
+        try:
+            reussies, echouees = reprojection.uniformiser(
+                projet, cible, divergentes,
+                journal_avancement=lambda m: self._log(m),
+            )
+        finally:
+            self._stop_loading()
+
+        for nom, motif in echouees:
+            self._log(tr("« {0} » n'a pas pu être reprojetée : {1}", nom, motif), "error")
+        if echouees:
+            self._log(
+                tr('Publication interrompue. Une sauvegarde « .bak » a été '
+                'posée à côté de chaque fichier touché.'), 'warn')
+            return False
+
+        self._log(
+            tr('{0} couche(s) reprojetée(s) en {1}. Le projet a été enregistré sous son nom ; une sauvegarde « .qgs.bak » est disponible en cas de besoin.', len(reussies), cible), 'success')
+        return True
+
+    # Cout d'une mise en page GARNIE a la lecture du projet par QGIS Server,
+    # en secondes, et delai au dela duquel le serveur abandonne. Mesures sur
+    # une instance reelle : sept mises en page = plus de 30 s et le processus
+    # tue, les memes sept VIDES = 1 s. Ces valeurs sont celles du validateur
+    # cote serveur (qgs_validator.COUT_MISE_EN_PAGE_S / DELAI_SERVEUR_S) : si
+    # l'une bouge, l'autre doit suivre.
+    COUT_MISE_EN_PAGE_S = 5.0
+    DELAI_SERVEUR_S = 30
+    SEUIL_MISES_EN_PAGE_ALERTE = 3
+
+    def _verifier_mises_en_page_avant_publication(self):
+        """Avertit quand les mises en page empechent le projet de se charger.
+
+        QGIS Server relit toutes les mises en page a l'ouverture du projet,
+        avant de dessiner quoi que ce soit ; chacune coute quelques secondes,
+        et le total se compare au delai du serveur. Passe ce delai, la carte
+        repond une erreur a chaque demarrage a froid, sans qu'aucune couche
+        soit en cause — un defaut invisible ici, ou QGIS garde le projet
+        ouvert et ne paie cette lecture qu'une fois.
+
+        Seules les mises en page GARNIES comptent : une mise en page vide ne
+        coute rien, c'est ce qu'elle contient qui se paie.
+
+        Le plugin ne supprime rien : une mise en page represente du travail,
+        et le choix de celle a garder n'appartient qu'a son auteur. Il
+        avertit, et laisse decider.
+
+        Rend True si la publication peut se poursuivre.
+        """
+        try:
+            projet = QgsProject.instance()
+            garnies = []
+            for mep in projet.layoutManager().printLayouts():
+                # `items()` compte aussi la page elle-meme et les reperes ;
+                # seuls les elements poses par l'auteur nous interessent.
+                elements = [e for e in mep.items()
+                            if getattr(e, 'type', None) and e.type() >= 65638]
+                if elements:
+                    garnies.append((mep.name(), len(elements)))
+        except Exception as e:  # noqa: BLE001
+            journal.ignorer(e, 'controle des mises en page avant publication')
+            return True          # ne jamais bloquer sur le controle lui-meme
+
+        if len(garnies) < self.SEUIL_MISES_EN_PAGE_ALERTE:
+            return True
+
+        cout = len(garnies) * self.COUT_MISE_EN_PAGE_S
+        noms = ', '.join('« {} »'.format(nom) for nom, _ in garnies[:4])
+        if len(garnies) > 4:
+            noms += tr(' et {} autre(s)').format(len(garnies) - 4)
+
+        if cout >= self.DELAI_SERVEUR_S:
+            gravite = (tr('Le serveur ne pourra PAS ouvrir ce projet : il '
+                       'abandonne au bout de {} secondes.')
+                       .format(self.DELAI_SERVEUR_S))
+        else:
+            gravite = (tr('La marge est mince : le moindre ralentissement fera '
+                       'basculer la carte en erreur.'))
+
+        reponse = QMessageBox.question(
+            self,
+            tr('Mises en page nombreuses'),
+            tr('Ce projet contient {} mises en page : {}.\n\n'
+            'Le serveur les relit toutes à chaque ouverture du projet, avant '
+            "d'afficher la moindre couche : comptez environ {:.0f} secondes. "
+            '{}\n\n'
+            "Ne gardez qu'une ou deux mises en page dans le projet publié. "
+            "Les autres formats restent accessibles à l'impression en "
+            'changeant le format de sortie : vous ne perdez que les gabarits '
+            'enregistrés.\n\n'
+            'Publier quand même ?').format(len(garnies), noms, cout, gravite),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reponse != QMessageBox.StandardButton.Yes:
+            self._log(
+                tr('Publication annulée. Supprimez les mises en page inutiles '
+                '(Projet ▸ Gestionnaire de mises en page), enregistrez, puis '
+                'republiez.'), 'warn')
+            return False
+
+        self._log(
+            tr('{} mises en page conservées : le chargement de la carte prendra '
+            'environ {:.0f} secondes.').format(len(garnies), cout), 'warn')
+        return True
 
     def _do_publish_project(self):
         """
@@ -2523,24 +3694,32 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if self._check_quota_block('publication'):
             return
         if not self.session.is_connected():
-            self._log('Connectez-vous d\'abord à une instance.', 'warn')
+            self._log(tr('Connectez-vous d\'abord à une instance.'), 'warn')
             return
 
         project    = QgsProject.instance()
         local_path = project.fileName()
         if not local_path:
             self._log(
-                'Aucun projet QGIS ouvert. '
-                'Ouvrez un projet (Ctrl+O) ou créez-en un et sauvegardez-le (Ctrl+S).',
+                tr('Aucun projet QGIS ouvert. '
+                'Ouvrez un projet (Ctrl+O) ou créez-en un et sauvegardez-le (Ctrl+S).'),
                 'warn',
             )
             return
 
+        # Avant tout envoi : le projet doit pouvoir etre accepte.
+        if not self._verifier_projections_avant_publication():
+            return
+        if not self._verifier_mises_en_page_avant_publication():
+            return
+        # Le projet a pu etre reenregistre par la reprojection : on relit son
+        # chemin plutot que de se fier a celui d'avant.
+        local_path = project.fileName() or local_path
+
         dest_path = self.txt_publish_dest.text().strip()
         if not dest_path:
             self._log(
-                'Indiquez le chemin de destination sur le serveur.\n'
-                'Ex: /qgis/mon-projet.qgs — ou sélectionnez un fichier dans la liste.',
+                tr('Indiquez le chemin de destination sur le serveur.\nEx: /qgis/mon-projet.qgs, ou sélectionnez un fichier dans la liste.'),
                 'warn',
             )
             return
@@ -2552,10 +3731,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         # Sauvegarder automatiquement le projet QGIS
         if not project.write():
-            self._log('Échec de la sauvegarde locale du projet.', 'error')
+            self._log(tr('Échec de la sauvegarde locale du projet.'), 'error')
             return
 
-        self._log(f'Publication → {dest_path}…')
+        self._log(tr('Publication → {0}…', dest_path))
         self.btn_publish.setEnabled(False)
         self._save_worker = SaveSymbologyWorker(self.session, local_path, dest_path)
         self._save_worker.finished.connect(self._on_published)
@@ -2563,7 +3742,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._save_worker.error.connect(
             lambda e: (self._log(e, 'error'), self.btn_publish.setEnabled(True))
         )
-        self._start_loading('Publication vers Lizmap…')
+        self._start_loading(tr('Publication vers Lizmap…'))
         self._save_worker.finished.connect(lambda: self._stop_loading())
         self._save_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._save_worker)
@@ -2571,7 +3750,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _on_published(self):
         self.btn_publish.setEnabled(True)
-        self._log('Projet publié — Lizmap recharge automatiquement.', 'ok')
+        self._log(tr('Projet publié : Lizmap recharge automatiquement.'), 'ok')
         self._load_files()  # rafraîchir l'arbre
 
     def _sync_open_button(self):
@@ -2587,10 +3766,15 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         projet = bool(
             chemin and not dossier and chemin.lower().endswith(('.qgs', '.qgz'))
         ) and not self._lecture_seule
+        if projet and getattr(self.session, 'est_protege', lambda _c: False)(chemin):
+            projet = False
+            self.btn_open.setEnabled(False)
+            self.btn_open.setToolTip(tr('Projets protégés sur cette instance : ouverture désactivée.'))
+            return
         self.btn_open.setEnabled(projet)
         self.btn_open.setToolTip(
-            'Ouvrir le projet .qgs/.qgz sélectionné dans QGIS' if projet
-            else 'Sélectionnez un fichier .qgs ou .qgz'
+            tr('Ouvrir le projet .qgs/.qgz sélectionné dans QGIS') if projet
+            else tr('Sélectionnez un fichier .qgs ou .qgz')
         )
 
     def _on_file_click(self, item, _col):
@@ -2599,6 +3783,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         is_dir   = item.data(0, Qt.ItemDataRole.UserRole + 2)
         if api_path and not is_dir:
             self.txt_publish_dest.setText(api_path)
+            # Choix explicite : la navigation ne doit plus le remplacer.
+            self._dest_choisie = True
 
     def _on_file_dblclick(self, item, _col):
         api_path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -2606,11 +3792,16 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if is_dir:
             self._path_history.append(self._current_path)
             self._current_path = api_path
+            self._entrer_dans_dossier()
             self.tree.clear()           # feedback immédiat
             self.lbl_path.setText(api_path)
             self._load_files()
         elif api_path and api_path.lower().endswith(('.qgz', '.qgs')):
             self._do_open_project()
+
+    def _entrer_dans_dossier(self):
+        """Change de dossier : la destination redevient une suggestion."""
+        self._dest_choisie = False
 
     # ══════════════════════════════════════════════════════════════════
     # Actions — Gestion fichiers (nouveau dossier, supprimer, renommer, upload ici)
@@ -2627,43 +3818,53 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                        (items[0].data(0, Qt.ItemDataRole.UserRole) or '').lower().endswith(('.qgs', '.qgz')))
 
             if is_proj and len(items) == 1:
-                act_open = menu.addAction(_icon('download', 'white', 14), 'Ouvrir dans QGIS')
+                act_open = menu.addAction(_icon('download', 'white', 14), tr('Ouvrir dans QGIS'))
                 act_open.triggered.connect(self._do_open_project)
+                act_open.setEnabled(not getattr(self.session, 'est_protege', lambda _c: False)(
+                    items[0].data(0, Qt.ItemDataRole.UserRole + 1) or ''))
+                act_val = menu.addAction(
+                    _icon('check-circle', _C_PRIMARY, 14), tr('Valider le projet'))
+                act_val.triggered.connect(self._valider_selection)
                 menu.addSeparator()
 
             if len(items) == 1:
-                act_rename = menu.addAction(_icon('edit-2', _C_MUTED, 14), 'Renommer')
+                act_rename = menu.addAction(_icon('edit-2', _C_MUTED, 14), tr('Renommer'))
                 act_rename.triggered.connect(self._do_rename_selected)
 
-            lbl_copy = f'Copier ({len(items)})' if len(items) > 1 else 'Copier'
+            lbl_copy = tr('Copier ({0})', len(items)) if len(items) > 1 else tr('Copier')
             act_copy = menu.addAction(_icon('copy', _C_MUTED, 14), lbl_copy)
             act_copy.triggered.connect(self._do_copy)
 
-            lbl_cut = f'Couper ({len(items)})' if len(items) > 1 else 'Couper'
+            lbl_cut = tr('Couper ({0})', len(items)) if len(items) > 1 else tr('Couper')
             act_cut = menu.addAction(_icon('scissors', _C_MUTED, 14), lbl_cut)
             act_cut.triggered.connect(self._do_cut)
 
-            lbl_del = f'Supprimer ({len(items)})' if len(items) > 1 else 'Supprimer'
+            lbl_del = tr('Supprimer ({0})', len(items)) if len(items) > 1 else tr('Supprimer')
             act_del = menu.addAction(_icon('trash-2', '#e74c3c', 14), lbl_del)
             act_del.triggered.connect(self._do_delete_selected)
             menu.addSeparator()
 
         if getattr(self, '_clipboard_ids', None):
-            mode = 'Coller' if self._clipboard_mode == 'copy' else 'Déplacer ici'
+            mode = tr('Coller') if self._clipboard_mode == 'copy' else tr('Déplacer ici')
             count = len(self._clipboard_ids)
             act_paste = menu.addAction(
                 _icon('clipboard', _C_SUCCESS_TX, 14),
-                f'{mode} ({count} élément(s))',
+                tr('{0} ({1} élément(s))', mode, count),
             )
             act_paste.triggered.connect(self._do_paste)
             menu.addSeparator()
 
-        act_mkdir = menu.addAction(_icon('folder-plus', _C_MUTED, 14), 'Nouveau dossier ici')
+        act_mkdir = menu.addAction(_icon('folder-plus', _C_MUTED, 14), tr('Nouveau dossier ici'))
         act_mkdir.triggered.connect(self._do_create_folder)
-        act_up = menu.addAction(_icon('upload', _C_MUTED, 14), 'Uploader des fichiers ici')
+        act_up = menu.addAction(_icon('upload', _C_MUTED, 14), tr('Uploader des fichiers ici'))
         act_up.triggered.connect(self._do_upload_here)
-        act_up_dir = menu.addAction(_icon('folder-upload', _C_PRIMARY, 14), 'Uploader un dossier ici')
+        act_up_dir = menu.addAction(_icon('folder-upload', _C_PRIMARY, 14), tr('Uploader un dossier ici'))
         act_up_dir.triggered.connect(self._do_upload_folder_here)
+
+        if self._jeton_lecture:
+            for act in menu.actions():
+                if not act.isSeparator() and act.text() not in (tr('Ouvrir dans QGIS'), tr('Valider le projet')):
+                    act.setEnabled(False)
 
         # exec() et non exec_() : Qt6 supprime l'alias historique, ajoute
         # en Python 2 quand « exec » etait un mot reserve.
@@ -2682,27 +3883,29 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     def _do_copy(self):
         ids = self._selected_ids()
         if not ids:
-            self._log('Sélectionnez au moins un élément à copier.', 'warn')
+            self._log(tr('Sélectionnez au moins un élément à copier.'), 'warn')
             return
         self._clipboard_ids = ids
         self._clipboard_mode = 'copy'
         names = [it.text(0) for it in self.tree.selectedItems()]
-        self._log(f'{len(ids)} élément(s) copié(s) : {", ".join(names)}')
+        self._log(tr('{0} élément(s) copié(s) : {1}', len(ids), ", ".join(names)))
 
     def _do_cut(self):
         ids = self._selected_ids()
         if not ids:
-            self._log('Sélectionnez au moins un élément à couper.', 'warn')
+            self._log(tr('Sélectionnez au moins un élément à couper.'), 'warn')
             return
         self._clipboard_ids = ids
         self._clipboard_mode = 'cut'
         names = [it.text(0) for it in self.tree.selectedItems()]
-        self._log(f'{len(ids)} élément(s) coupé(s) : {", ".join(names)}')
+        self._log(tr('{0} élément(s) coupé(s) : {1}', len(ids), ", ".join(names)))
 
     def _do_paste(self):
+        if self._refus_jeton_lecture():
+            return
         ids = getattr(self, '_clipboard_ids', None)
         if not ids:
-            self._log('Rien à coller. Copiez ou coupez d\'abord un élément.', 'warn')
+            self._log(tr('Rien à coller. Copiez ou coupez d\'abord un élément.'), 'warn')
             return
         if not self.session.is_connected():
             return
@@ -2713,122 +3916,132 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if mode == 'copy':
             if self._check_quota_block('copie'):
                 return
-            self._start_loading(f'Copie de {count} élément(s)…')
+            self._start_loading(tr('Copie de {0} élément(s)…', count))
             try:
                 self.session.copy_files(ids, dest)
                 self._stop_loading()
-                self._log(f'{count} élément(s) collé(s) dans {dest}', 'ok')
+                self._log(tr('{0} élément(s) collé(s) dans {1}', count, dest), 'ok')
             except Exception as e:
                 self._stop_loading()
-                self._log(f'Erreur copie : {e}', 'error')
+                self._log(tr('Erreur copie : {0}', e), 'error')
         else:
-            self._start_loading(f'Déplacement de {count} élément(s)…')
+            self._start_loading(tr('Déplacement de {0} élément(s)…', count))
             try:
                 self.session.move_files(ids, dest)
                 self._stop_loading()
-                self._log(f'{count} élément(s) déplacé(s) vers {dest}', 'ok')
+                self._log(tr('{0} élément(s) déplacé(s) vers {1}', count, dest), 'ok')
                 self._clipboard_ids = None  # couper = one-shot
             except Exception as e:
                 self._stop_loading()
-                self._log(f'Erreur déplacement : {e}', 'error')
+                self._log(tr('Erreur déplacement : {0}', e), 'error')
 
         self._load_files()
 
     def _do_create_folder(self):
-        if self._check_quota_block('création de dossier'):
+        if self._refus_jeton_lecture():
+            return
+        if self._check_quota_block(tr('création de dossier')):
             return
         if not self.session.is_connected():
             return
-        name, ok = QInputDialog.getText(self, 'Nouveau dossier', 'Nom du dossier :')
+        name, ok = QInputDialog.getText(self, tr('Nouveau dossier'), tr('Nom du dossier :'))
         if not ok or not name.strip():
             return
         name = name.strip()
-        self._start_loading(f'Création de "{name}"…')
+        self._start_loading(tr('Création de "{0}"…', name))
         self._mkdir_worker = CreateFolderWorker(self.session, name, self._current_path)
         self._mkdir_worker.finished.connect(lambda: (self._stop_loading(), self._load_files(),
-                                                     self._log(f'Dossier "{name}" créé.', 'ok')))
+                                                     self._log(tr('Dossier "{0}" créé.', name), 'ok')))
         self._mkdir_worker.error.connect(lambda e: (self._stop_loading(),
-                                                    self._log(f'Erreur : {e}', 'error')))
+                                                    self._log(tr('Erreur : {0}', e), 'error')))
         self._suivre(self._mkdir_worker)
         self._mkdir_worker.start()
 
     def _do_delete_selected(self):
+        if self._refus_jeton_lecture():
+            return
         ids = self._selected_ids()
         if not ids:
-            self._log('Aucun élément sélectionné.', 'warn')
+            self._log(tr('Aucun élément sélectionné.'), 'warn')
             return
         names = [item.text(0) for item in self.tree.selectedItems()]
         preview = ', '.join(names[:3]) + (f' … +{len(names)-3}' if len(names) > 3 else '')
         rep = QMessageBox.question(
-            self, 'Confirmer la suppression',
-            f'Supprimer {len(ids)} élément(s) ?\n{preview}',
+            self, tr('Confirmer la suppression'),
+            tr('Supprimer {0} élément(s) ?\n{1}', len(ids), preview),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if rep != QMessageBox.StandardButton.Yes:
             return
-        self._start_loading(f'Suppression de {len(ids)} élément(s)…')
+        self._start_loading(tr('Suppression de {0} élément(s)…', len(ids)))
         self._del_worker = DeleteWorker(self.session, ids)
         self._del_worker.finished.connect(lambda: (self._stop_loading(), self._load_files(),
-                                                   self._log(f'{len(ids)} élément(s) supprimé(s).', 'ok')))
+                                                   self._log(tr('{0} élément(s) supprimé(s).', len(ids)), 'ok')))
         self._del_worker.error.connect(lambda e: (self._stop_loading(),
-                                                  self._log(f'Erreur suppression : {e}', 'error')))
+                                                  self._log(tr('Erreur suppression : {0}', e), 'error')))
         self._suivre(self._del_worker)
         self._del_worker.start()
 
     def _do_rename_selected(self):
+        if self._refus_jeton_lecture():
+            return
         items = self.tree.selectedItems()
         if len(items) != 1:
-            self._log('Sélectionnez un seul élément pour le renommer.', 'warn')
+            self._log(tr('Sélectionnez un seul élément pour le renommer.'), 'warn')
             return
         item    = items[0]
         file_id = item.data(0, Qt.ItemDataRole.UserRole + 1)
         old     = item.text(0)
-        new_name, ok = QInputDialog.getText(self, 'Renommer', 'Nouveau nom :', text=old)
+        new_name, ok = QInputDialog.getText(self, tr('Renommer'), tr('Nouveau nom :'), text=old)
         if not ok or not new_name.strip() or new_name.strip() == old:
             return
         new_name = new_name.strip()
-        self._start_loading(f'Renommage vers "{new_name}"…')
+        self._start_loading(tr('Renommage vers "{0}"…', new_name))
         self._ren_worker = RenameWorker(self.session, file_id, new_name)
         self._ren_worker.finished.connect(lambda: (self._stop_loading(), self._load_files(),
-                                                   self._log(f'"{old}" renommé en "{new_name}".', 'ok')))
+                                                   self._log(tr('"{0}" renommé en "{1}".', old, new_name), 'ok')))
         self._ren_worker.error.connect(lambda e: (self._stop_loading(),
-                                                  self._log(f'Erreur renommage : {e}', 'error')))
+                                                  self._log(tr('Erreur renommage : {0}', e), 'error')))
         self._suivre(self._ren_worker)
         self._ren_worker.start()
 
     def _do_upload_here(self):
         """Upload un ou plusieurs fichiers dans le dossier courant."""
-        if self._check_quota_block('upload de fichiers'):
+        if self._refus_jeton_lecture():
+            return
+        if self._check_quota_block(tr('upload de fichiers')):
             return
         if not self.session.is_connected():
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, f'Uploader vers {self._current_path}',
-            self._repertoire_travail(), 'Tous les fichiers (*.*)'
+            self, tr('Uploader vers {0}', self._current_path),
+            self._repertoire_travail(), tr('Tous les fichiers (*.*)')
         )
         if not paths:
             return
         self._definir_repertoire_travail(os.path.dirname(paths[0]))
-        self._start_loading(f'Upload de {len(paths)} fichier(s)…')
+        self._start_loading(tr('Upload de {0} fichier(s)…', len(paths)))
         self._upf_worker = UploadFilesWorker(self.session, paths, self._current_path)
         self._upf_worker.progress.connect(
-            lambda cur, tot, fname: self._log(f'  [{cur}/{tot}] {fname}…')
+            lambda cur, tot, fname: self._log(tr('  [{0}/{1}] {2}…', cur, tot, fname))
         )
         self._upf_worker.finished.connect(lambda n: (self._stop_loading(), self._load_files(),
-                                                     self._log(f'{n} fichier(s) uploadé(s).', 'ok')))
+                                                     self._log(tr('{0} fichier(s) uploadé(s).', n), 'ok')))
         self._upf_worker.error.connect(lambda e: (self._stop_loading(),
-                                                  self._log(f'Erreur upload : {e}', 'error')))
+                                                  self._log(tr('Erreur upload : {0}', e), 'error')))
         self._suivre(self._upf_worker)
         self._upf_worker.start()
 
     def _do_upload_folder_here(self):
         """Upload un dossier entier dans le dossier courant via batch."""
-        if self._check_quota_block('upload de dossier'):
+        if self._refus_jeton_lecture():
+            return
+        if self._check_quota_block(tr('upload de dossier')):
             return
         if not self.session.is_connected():
             return
         folder = QFileDialog.getExistingDirectory(
-            self, f'Uploader un dossier vers {self._current_path}',
+            self, tr('Uploader un dossier vers {0}', self._current_path),
             self._repertoire_travail(),
         )
         if not folder:
@@ -2844,19 +4057,19 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 local = os.path.join(root, fname)
                 entries.append(local)
         if not entries:
-            self._log('Le dossier est vide.', 'warn')
+            self._log(tr('Le dossier est vide.'), 'warn')
             return
         folder_name = os.path.basename(folder)
-        self._log(f'Upload du dossier « {folder_name} » ({len(entries)} fichier(s))…')
-        self._start_loading(f'Upload de {len(entries)} fichier(s)…')
+        self._log(tr('Upload du dossier « {0} » ({1} fichier(s))…', folder_name, len(entries)))
+        self._start_loading(tr('Upload de {0} fichier(s)…', len(entries)))
         self._updir_worker = UploadFolderWorker(self.session, folder, self._current_path)
         self._updir_worker.progress.connect(
-            lambda cur, tot, fname: self._log(f'  [{cur}/{tot}] {fname}…')
+            lambda cur, tot, fname: self._log(tr('  [{0}/{1}] {2}…', cur, tot, fname))
         )
         self._updir_worker.finished.connect(lambda n: (self._stop_loading(), self._load_files(),
-                                                       self._log(f'{n} fichier(s) uploadé(s).', 'ok')))
+                                                       self._log(tr('{0} fichier(s) uploadé(s).', n), 'ok')))
         self._updir_worker.error.connect(lambda e: (self._stop_loading(),
-                                                    self._log(f'Erreur upload : {e}', 'error')))
+                                                    self._log(tr('Erreur upload : {0}', e), 'error')))
         self._suivre(self._updir_worker)
         self._updir_worker.start()
 
@@ -2865,20 +4078,20 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     # ══════════════════════════════════════════════════════════════════
 
     def _do_upload_folder(self):
-        if self._check_quota_block('upload de dossier'):
+        if self._check_quota_block(tr('upload de dossier')):
             return
         local  = self.txt_local.text()
         remote = self.txt_remote.text().strip() or '/'
         if not local or not os.path.isdir(local):
-            self._log('Sélectionnez un dossier local valide.', 'warn')
+            self._log(tr('Sélectionnez un dossier local valide.'), 'warn')
             return
         if not self.session.is_connected():
-            self._log('Non connecté.', 'warn')
+            self._log(tr('Non connecté.'), 'warn')
             return
         self.btn_upload.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setValue(0)
-        self._log(f'Upload : {local}  →  {remote}…')
+        self._log(tr('Upload : {0}  →  {1}…', local, remote))
         self._up_worker = UploadFolderWorker(self.session, local, remote)
         self._up_worker.progress.connect(self._on_upload_progress)
         self._up_worker.finished.connect(self._on_upload_done)
@@ -2889,7 +4102,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 self.progress.setVisible(False),
             )
         )
-        self._start_loading('Upload en cours…')
+        self._start_loading(tr('Upload en cours…'))
         self._up_worker.finished.connect(lambda _: self._stop_loading())
         self._up_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._up_worker)
@@ -2898,18 +4111,18 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     def _on_upload_progress(self, cur, tot, fname):
         self.progress.setMaximum(tot)
         self.progress.setValue(cur)
-        self.lbl_progress.setText(f'{fname}  ({cur} / {tot})')
+        self.lbl_progress.setText(tr('{0}  ({1} / {2})', fname, cur, tot))
 
     def _on_upload_done(self, count):
         self.btn_upload.setEnabled(True)
         self.progress.setVisible(False)
         self.lbl_progress.setText('')
-        self._log(f'{count} fichier(s) uploadé(s).', 'ok')
+        self._log(tr('{0} fichier(s) uploadé(s).', count), 'ok')
         self._load_files()
 
     def _browse_folder(self):
         path = QFileDialog.getExistingDirectory(
-            self, 'Sélectionner un dossier', self._repertoire_travail(),
+            self, tr('Sélectionner un dossier'), self._repertoire_travail(),
         )
         if path:
             self.txt_local.setText(path)
@@ -2953,64 +4166,60 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self.pg_unavailable.setVisible(
             self.session.is_connected() and not dispo
         )
+        raison = getattr(self.session, 'metadata_error', '')
+        if raison:
+            r = raison.rstrip('.')
+            texte = (tr("La base PostGIS de l'instance ne peut pas être ouverte : {0}.", r[:1].lower() + r[1:]))
+            if 'droit' in r:
+                texte += tr("\nDemandez ce droit à un administrateur du portail.")
+            self.lbl_pg_indispo.setText(texte)
+        else:
+            self.lbl_pg_indispo.setText(
+                tr("PostGIS non disponible pour cette instance.\n"
+                "L'instance doit être déployée avec une base de données "
+                "PostgreSQL/PostGIS pour utiliser cette fonctionnalité."))
         self.lst_pg.setVisible(dispo)
         self.btn_load_pg.setEnabled(dispo)
         self.btn_diag_pg.setEnabled(dispo)
+        # Serveur de son organisation : le portail optimise la base lui-même
+        # (Maintenance > Accélérer) ; le bouton ne mènerait qu'à un refus.
+        self.btn_diag_pg.setVisible(not getattr(self.session, 'entreprise', False))
         self._sync_pg_buttons()
 
     def _load_postgis_tables(self):
+        """Demande la liste des tables, sans bloquer l'interface."""
         if not self._postgis_disponible():
             self._sync_postgis_etat()
             return
         self._sync_postgis_etat()
         pg = self.session.get_postgis_uri()
-        try:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=pg['host'], port=pg['port'],
-                dbname=pg['dbname'], user=pg['user'],
-                password=pg['password'], connect_timeout=10,
-            )
-            cur = conn.cursor()
-            # Toutes les tables/vues/vues mat. — colonne géom optionnelle
-            cur.execute("""
-                SELECT
-                    c.relname  AS table_name,
-                    n.nspname  AS table_schema,
-                    MAX(CASE WHEN t.typname IN ('geometry','geography')
-                             THEN a.attname END)  AS geom_col,
-                    COALESCE(
-                        (SELECT srid FROM geometry_columns g
-                         WHERE g.f_table_schema = n.nspname
-                           AND g.f_table_name   = c.relname
-                         LIMIT 1),
-                        0
-                    )                             AS srid
-                FROM pg_class      c
-                JOIN pg_namespace  n ON c.relnamespace = n.oid
-                LEFT JOIN pg_attribute a ON a.attrelid = c.oid
-                                        AND a.attnum > 0
-                                        AND NOT a.attisdropped
-                LEFT JOIN pg_type  t ON a.atttypid = t.oid
-                WHERE c.relkind IN ('r', 'v', 'm')
-                  AND n.nspname NOT IN (
-                        'pg_catalog','information_schema',
-                        'topology','tiger','tiger_data','public','lizmap'
-                      )
-                GROUP BY c.relname, n.nspname
-                ORDER BY n.nspname, c.relname
-            """)
-            rows = cur.fetchall()
-            cur.close()
-            conn.close()
-        except ImportError:
-            self._log('psycopg2 non disponible — utilisation du provider QGIS.')
-            self._load_pg_via_qgis(pg)
-            return
-        except Exception as e:
-            self._log(f'Connexion PostGIS échouée : {e}', 'error')
-            return
 
+        self.btn_load_pg.setEnabled(False)
+        self._log(tr('Lecture des tables de la base…'))
+        self._start_loading(tr('Lecture des tables…'))
+        self._tables_worker = ListerTablesWorker(pg)
+        self._tables_worker.finished.connect(
+            lambda lignes: self._on_tables_pretes(pg, lignes))
+        self._tables_worker.manquant.connect(
+            lambda: (self._log(
+                tr('psycopg2 non disponible : utilisation du provider QGIS.')),
+                self._load_pg_via_qgis(pg))
+        )
+        self._tables_worker.error.connect(
+            lambda e: self._log(tr('Connexion PostGIS échouée : {}').format(e), 'error'))
+        for signal in (self._tables_worker.finished,
+                       self._tables_worker.error):
+            signal.connect(lambda _=None: self._stop_loading())
+        self._tables_worker.manquant.connect(lambda: self._stop_loading())
+        for signal in (self._tables_worker.finished,
+                       self._tables_worker.error,
+                       self._tables_worker.manquant):
+            signal.connect(lambda *_: self._sync_pg_buttons())
+        self._suivre(self._tables_worker)
+        self._tables_worker.start()
+
+    def _on_tables_pretes(self, pg, rows):
+        """Remplit la liste. Tout ce qui touche a Qt reste dans ce fil-ci."""
         self.lst_pg.clear()
         db_ico = _icon('database', '#8e44ad', 14)
         for table, schema, geom_col, srid in rows:
@@ -3018,7 +4227,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             # (styles, projets stockes en base), pas des couches a afficher.
             if table in _PG_TABLES_INTERNES:
                 continue
-            item = QTreeWidgetItem([table, schema, geom_col or '—', str(srid)])
+            item = QTreeWidgetItem([table, schema, geom_col or '·', str(srid)])
             item.setIcon(0, db_ico)
             item.setData(0, Qt.ItemDataRole.UserRole, {
                 **pg, 'table': table, 'schema': schema,
@@ -3028,7 +4237,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 'geom_col': geom_col or '',
             })
             self.lst_pg.addTopLevelItem(item)
-        self._log(f'{self.lst_pg.topLevelItemCount()} table(s) chargée(s).', 'ok')
+        self._log(tr('{} table(s) chargée(s).').format(
+            self.lst_pg.topLevelItemCount()), 'ok')
         self._sync_pg_buttons()
         self._detect_default_schema(rows)
 
@@ -3075,8 +4285,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                     continue
                 item = QTreeWidgetItem([
                     t.tableName(), t.schema() or 'public',
-                    t.geometryColumnName() or '—',
-                    str(t.crs().postgisSrid()) if t.crs().isValid() else '—',
+                    t.geometryColumnName() or '·',
+                    str(t.crs().postgisSrid()) if t.crs().isValid() else '·',
                 ])
                 item.setIcon(0, db_ico)
                 item.setData(0, Qt.ItemDataRole.UserRole, {
@@ -3085,7 +4295,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                     'geom_col': t.geometryColumnName() or '',
                 })
                 self.lst_pg.addTopLevelItem(item)
-            self._log(f'{self.lst_pg.topLevelItemCount()} table(s) chargée(s).', 'ok')
+            self._log(tr('{0} table(s) chargée(s).', self.lst_pg.topLevelItemCount()), 'ok')
             self._sync_pg_buttons()
             # Pré-remplir le schéma d'import
             _SKIP_PG = {'public', 'lizmap', 'pg_catalog', 'information_schema',
@@ -3100,7 +4310,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _add_postgis_layer(self, item):
         if not item:
-            self._log('Sélectionnez une table.', 'warn')
+            self._log(tr('Sélectionnez une table.'), 'warn')
             return
         info = item.data(0, Qt.ItemDataRole.UserRole)
         if not info:
@@ -3114,19 +4324,18 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         layer = QgsVectorLayer(uri.uri(False), info['table'], 'postgres')
         if layer.isValid():
             QgsProject.instance().addMapLayer(layer)
-            self._log(f'Couche "{info["table"]}" ajoutée.', 'ok')
+            self._log(tr('Couche "{0}" ajoutée.', info["table"]), 'ok')
         else:
             # Ne pas incriminer le reseau a l'aveugle : si d'autres couches
             # viennent d'etre chargees, la connexion fonctionne et le probleme
             # est propre a cette table.
             detail = layer.error().summary() if layer.error().messageList() else ''
             if QgsProject.instance().mapLayers():
-                raison = detail or 'table sans clef primaire exploitable par QGIS'
+                raison = detail or tr('table sans clef primaire exploitable par QGIS')
             else:
-                raison = detail or (
-                    f'verifiez que {info["host"]}:{info["port"]} est accessible'
-                )
-            self._log(f'Couche "{info["table"]}" invalide — {raison}.', 'error')
+                raison = detail or tr('vérifiez que {0}:{1} est accessible',
+                                      info["host"], info["port"])
+            self._log(tr('Couche "{0}" invalide : {1}.', info["table"], raison), 'error')
 
     # ══════════════════════════════════════════════════════════════════
     # Actions — Import PostGIS
@@ -3137,9 +4346,9 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     # ══════════════════════════════════════════════════════════════════
 
     _COULEURS_GRAVITE = {
-        'grave':  (_C_ERROR,   'Critique'),
-        'moyen':  (_C_WARN,    'À traiter'),
-        'mineur': (_C_MUTED,   'Mineur'),
+        'grave':  (_C_ERROR,   tr('Critique')),
+        'moyen':  (_C_WARN,    tr('À traiter')),
+        'mineur': (_C_MUTED,   tr('Mineur')),
     }
 
     def _sync_pg_buttons(self):
@@ -3152,8 +4361,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         table = self.lst_pg.currentItem() is not None
         self.btn_add_pg.setEnabled(table)
         self.btn_add_pg.setToolTip(
-            'Ajouter la table sélectionnée comme couche' if table
-            else 'Sélectionnez une table dans la liste'
+            tr('Ajouter la table sélectionnée comme couche') if table
+            else tr('Sélectionnez une table dans la liste')
         )
 
         if not hasattr(self, 'btn_import_pg'):
@@ -3163,17 +4372,17 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         cible   = bool(self.txt_import_table.text().strip())
         if self._lecture_seule:
             self.btn_import_pg.setEnabled(False)
-            self.btn_import_pg.setToolTip('Lecture seule sur cet espace.')
+            self.btn_import_pg.setToolTip(tr('Lecture seule sur cet espace.'))
             return
         self.btn_import_pg.setEnabled(couche and schema and cible)
         if not couche:
-            raison = 'Ouvrez une couche vectorielle dans QGIS'
+            raison = tr('Ouvrez une couche vectorielle dans QGIS')
         elif not schema:
-            raison = 'Indiquez le schéma cible'
+            raison = tr('Indiquez le schéma cible')
         elif not cible:
-            raison = 'Indiquez le nom de la table à créer'
+            raison = tr('Indiquez le nom de la table à créer')
         else:
-            raison = 'Copier la couche QGIS dans la base de l\'instance'
+            raison = tr('Copier la couche QGIS dans la base de l\'instance')
         self.btn_import_pg.setToolTip(raison)
 
     def _do_diagnostic_db(self):
@@ -3181,8 +4390,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         pg = self.session.get_postgis_uri()
         if not all([pg['host'], pg['dbname'], pg['user'], pg['password']]):
             self._log(
-                "Informations de connexion à la base indisponibles : "
-                'impossible de diagnostiquer.',
+                tr("Informations de connexion à la base indisponibles : "
+                'impossible de diagnostiquer.'),
                 'warn',
             )
             return
@@ -3192,13 +4401,13 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self.btn_optim_pg.setEnabled(False)
         self.lst_sante.clear()
         self.grp_sante.setVisible(True)
-        self.lbl_sante.setText('Analyse en cours…')
+        self.lbl_sante.setText(tr('Analyse en cours…'))
 
-        self._diag_worker = DiagnosticDbWorker(pg)
+        self._diag_worker = DiagnosticDbWorker(pg, session=self.session)
         self._diag_worker.status.connect(lambda m: self._log(m))
         self._diag_worker.finished.connect(self._on_diagnostic_pret)
         self._diag_worker.error.connect(self._on_diagnostic_erreur)
-        self._start_loading('Diagnostic de la base…')
+        self._start_loading(tr('Diagnostic de la base…'))
         self._diag_worker.finished.connect(lambda _: self._stop_loading())
         self._diag_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._diag_worker)
@@ -3206,7 +4415,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _on_diagnostic_erreur(self, message):
         self.btn_diag_pg.setEnabled(True)
-        self.lbl_sante.setText('Diagnostic impossible.')
+        self.lbl_sante.setText(tr('Diagnostic impossible.'))
         self._log(message, 'error')
 
     def _on_diagnostic_pret(self, problemes):
@@ -3216,21 +4425,21 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         if not problemes:
             self.lbl_sante.setText(
-                'Aucun problème détecté : index spatiaux en place, '
-                'statistiques à jour, géométries raisonnables.'
+                tr('Aucun problème détecté : index spatiaux en place, '
+                'statistiques à jour, géométries raisonnables.')
             )
             self.btn_optim_pg.setEnabled(False)
-            self._log('Diagnostic : rien à corriger.', 'ok')
+            self._log(tr('Diagnostic : rien à corriger.'), 'ok')
             return
 
         for probleme in problemes:
             couleur, _ = self._COULEURS_GRAVITE[probleme.gravite]
             if probleme.automatique:
-                correction = 'Automatique'
+                correction = tr('Automatique')
             elif probleme.confirmable:
-                correction = 'Sur confirmation'
+                correction = tr('Sur confirmation')
             else:
-                correction = 'À la main'
+                correction = tr('À la main')
             item = QTreeWidgetItem(
                 [probleme.cible, probleme.titre, correction, probleme.detail]
             )
@@ -3243,7 +4452,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             if probleme.consequence:
                 infobulle = probleme.consequence + '\n\n' + infobulle
             if probleme.annulation:
-                infobulle += f'\n\nPour défaire :\n{probleme.annulation}'
+                infobulle += tr('\n\nPour défaire :\n{0}', probleme.annulation)
             for colonne in range(4):
                 item.setToolTip(colonne, infobulle)
             item.setData(0, Qt.ItemDataRole.UserRole, probleme)
@@ -3252,15 +4461,13 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         auto = [p for p in problemes if p.automatique]
         confirmer = [p for p in problemes if p.confirmable]
         manuel = len(problemes) - len(auto) - len(confirmer)
-        resume = f'{len(problemes)} point(s) à améliorer.'
+        resume = tr('{0} point(s) à améliorer.', len(problemes))
         if auto:
-            resume += f' {len(auto)} corrigeable(s) tout de suite.'
+            resume += tr(' {0} corrigeable(s) tout de suite.', len(auto))
         if confirmer:
-            resume += (f' {len(confirmer)} applicable(s) en les sélectionnant, '
-                       'après confirmation.')
+            resume += (tr(' {0} applicable(s) en les sélectionnant, après confirmation.', len(confirmer)))
         if manuel:
-            resume += (f' {manuel} demande(nt) une décision de votre part '
-                       '(survolez la ligne pour voir le SQL).')
+            resume += (tr(' {0} demande(nt) une décision de votre part (survolez la ligne pour voir le SQL).', manuel))
         self.lbl_sante.setText(resume)
         self._sync_optim_buttons()
         self._log(resume, 'warn')
@@ -3282,8 +4489,8 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             for bouton in (self.btn_optim_pg, self.btn_optim_sel):
                 bouton.setEnabled(False)
                 bouton.setToolTip(
-                    'Lecture seule : le diagnostic reste disponible, pas '
-                    'la correction.'
+                    tr('Lecture seule : le diagnostic reste disponible, pas '
+                    'la correction.')
                 )
             return
 
@@ -3292,11 +4499,11 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         self.btn_optim_pg.setEnabled(bool(tous))
         self.btn_optim_pg.setText(
-            f'Tout optimiser ({len(tous)})' if tous else 'Tout optimiser'
+            tr('Tout optimiser ({0})', len(tous)) if tous else tr('Tout optimiser')
         )
         self.btn_optim_pg.setToolTip(
-            f'Appliquer les {len(tous)} corrections automatiques' if tous
-            else 'Aucune correction automatique disponible'
+            tr('Appliquer les {0} corrections automatiques', len(tous)) if tous
+            else tr('Aucune correction automatique disponible')
         )
 
         self.btn_export_sante.setEnabled(
@@ -3304,17 +4511,17 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         )
         self.btn_optim_sel.setEnabled(bool(choisis))
         self.btn_optim_sel.setText(
-            f'Optimiser la sélection ({len(choisis)})' if choisis
-            else 'Optimiser la sélection'
+            tr('Optimiser la sélection ({0})', len(choisis)) if choisis
+            else tr('Optimiser la sélection')
         )
         selection = len(self.lst_sante.selectedItems())
         if choisis:
-            raison = f'Appliquer les {len(choisis)} corrections sélectionnées'
+            raison = tr('Appliquer les {0} corrections sélectionnées', len(choisis))
         elif selection:
-            raison = ('Les lignes sélectionnées demandent une décision de votre '
-                      'part : survolez-les pour voir le SQL à exécuter.')
+            raison = (tr('Les lignes sélectionnées demandent une décision de votre '
+                      'part : survolez-les pour voir le SQL à exécuter.'))
         else:
-            raison = 'Sélectionnez une ou plusieurs lignes dans le tableau'
+            raison = tr('Sélectionnez une ou plusieurs lignes dans le tableau')
         self.btn_optim_sel.setToolTip(raison)
 
     def _do_exporter_sante(self):
@@ -3333,10 +4540,10 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             self._repertoire_travail(),
             f'diagnostic-{instance}-{horodatage}.csv',
         )
-        CSV = 'Rapport CSV (*.csv)'
-        SQL = 'Script SQL (*.sql)'
+        CSV = tr('Rapport CSV (*.csv)')
+        SQL = tr('Script SQL (*.sql)')
         chemin, filtre = QFileDialog.getSaveFileName(
-            self, 'Exporter le diagnostic', defaut, f'{CSV};;{SQL}',
+            self, tr('Exporter le diagnostic'), defaut, f'{CSV};;{SQL}',
         )
         if not chemin:
             return
@@ -3356,11 +4563,11 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             with open(chemin, 'w', encoding='utf-8', newline='') as f:
                 f.write(contenu)
         except OSError as e:
-            self._log(f'Export impossible : {e}', 'error')
+            self._log(tr('Export impossible : {0}', e), 'error')
             return
 
         self._definir_repertoire_travail(os.path.dirname(chemin))
-        self._log(f'{len(problemes)} point(s) exporté(s) → {chemin}', 'ok')
+        self._log(tr('{0} point(s) exporté(s) → {1}', len(problemes), chemin), 'ok')
 
     def _do_optimiser_db(self, selection_seule=False):
         """Applique les corrections sûres, après confirmation."""
@@ -3371,27 +4578,26 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         details = '\n'.join(f'  • {p.cible} — {p.titre.lower()}' for p in auto[:12])
         if len(auto) > 12:
-            details += f'\n  … et {len(auto) - 12} autre(s)'
+            details += tr('\n  … et {0} autre(s)', len(auto) - 12)
 
         avec_consequence = [p for p in auto if p.confirmable]
-        texte = (f'{len(auto)} correction(s) vont être appliquées :\n\n'
-                 f'{details}\n\n')
+        texte = (tr('{0} correction(s) vont être appliquées :\n\n{1}\n\n', len(auto), details))
         if avec_consequence:
             # Une modification de schema ne doit pas passer dans le meme
             # souffle qu'un ANALYZE : elle est nommee a part.
-            texte += 'MODIFICATIONS DE STRUCTURE :\n'
+            texte += tr('MODIFICATIONS DE STRUCTURE :\n')
             for p in avec_consequence:
                 texte += f'  • {p.cible} : {p.consequence}\n'
             texte += '\n'
-        texte += ('Les autres opérations créent des index ou rafraîchissent '
+        texte += (tr('Les autres opérations créent des index ou rafraîchissent '
                   'des statistiques : elles ne touchent ni au schéma ni aux '
-                  'données.\n\nContinuer ?')
+                  'données.\n\nContinuer ?'))
         reponse = QMessageBox.question(
-            self, 'Optimiser la base ?', texte,
+            self, tr('Optimiser la base ?'), texte,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
         )
         if reponse != QMessageBox.StandardButton.Yes:
-            self._log('Optimisation annulée.', 'warn')
+            self._log(tr('Optimisation annulée.'), 'warn')
             return
 
         pg = self.session.get_postgis_uri()
@@ -3406,7 +4612,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                        self.btn_diag_pg.setEnabled(True),
                        self._sync_optim_buttons())
         )
-        self._start_loading('Optimisation de la base…')
+        self._start_loading(tr('Optimisation de la base…'))
         self._optim_worker.finished.connect(lambda *_: self._stop_loading())
         self._optim_worker.error.connect(lambda _: self._stop_loading())
         self._suivre(self._optim_worker)
@@ -3415,25 +4621,23 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     def _on_optimisation_finie(self, reussies, echouees):
         self.btn_diag_pg.setEnabled(True)
         for probleme in reussies:
-            self._log(f'✓ {probleme.cible} — {probleme.titre.lower()}', 'ok')
+            self._log(tr('✓ {0} : {1}', probleme.cible, probleme.titre.lower()), 'ok')
         # Tout ce qui vient d'etre cree peut se defaire : le dire ici evite
         # d'avoir a chercher le nom que PostgreSQL aurait choisi seul.
         annulations = [p.annulation for p in reussies if p.annulation]
         if annulations:
             self._log(
-                'Pour revenir en arrière :\n  '
-                + ';\n  '.join(annulations) + ';',
+                tr('Pour revenir en arrière :\n  {0};', ';\n  '.join(annulations)),
             )
         for probleme, motif in echouees:
-            self._log(f'✗ {probleme.cible} — {motif}', 'error')
+            self._log(tr('✗ {0} : {1}', probleme.cible, motif), 'error')
 
         if echouees:
             self._log(
-                f'{len(reussies)} correction(s) appliquée(s), '
-                f'{len(echouees)} en échec.', 'warn',
+                tr('{0} correction(s) appliquée(s), {1} en échec.', len(reussies), len(echouees)), 'warn',
             )
         else:
-            self._log(f'{len(reussies)} correction(s) appliquée(s).', 'ok')
+            self._log(tr('{0} correction(s) appliquée(s).', len(reussies)), 'ok')
         # Relancer le diagnostic pour montrer l'etat reel apres coup, plutot
         # que de laisser une liste perimee a l'ecran.
         self._do_diagnostic_db()
@@ -3464,45 +4668,45 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if self._check_quota_block('import PostGIS'):
             return
         if not self.session.is_connected():
-            self._log('Connectez-vous d\'abord à une instance.', 'warn')
+            self._log(tr('Connectez-vous d\'abord à une instance.'), 'warn')
             return
 
         pg = self.session.get_postgis_uri()
         if not all([pg['host'], pg['dbname'], pg['user']]):
-            self._log('PostGIS non disponible pour cette instance.', 'error')
+            self._log(tr('PostGIS non disponible pour cette instance.'), 'error')
             return
 
         layer_id = self.cmb_import_layer.currentData()
         if not layer_id:
-            self._log('Sélectionnez une couche à importer.', 'warn')
+            self._log(tr('Sélectionnez une couche à importer.'), 'warn')
             return
 
         layer = QgsProject.instance().mapLayer(layer_id)
         if not layer or not isinstance(layer, QgsVectorLayer):
-            self._log('Couche introuvable ou non vectorielle.', 'error')
+            self._log(tr('Couche introuvable ou non vectorielle.'), 'error')
             return
 
         schema = self.txt_import_schema.text().strip() or 'public'
         table  = self.txt_import_table.text().strip()
         if not table:
-            self._log('Indiquez un nom de table.', 'warn')
+            self._log(tr('Indiquez un nom de table.'), 'warn')
             return
 
-        self._log(f'Import de « {layer.name()} » → {schema}.{table}…')
+        self._log(tr('Import de « {0} » → {1}.{2}…', layer.name(), schema, table))
         self.btn_import_pg.setEnabled(False)
-        self._start_loading('Import dans PostGIS…')
+        self._start_loading(tr('Import dans PostGIS…'))
 
         self._import_worker = ImportToPostGISWorker(layer, pg, schema, table)
         self._import_worker.finished.connect(lambda: (
             self._stop_loading(),
             self.btn_import_pg.setEnabled(True),
-            self._log(f'Table « {schema}.{table} » importée avec succès.', 'ok'),
+            self._log(tr('Table « {0}.{1} » importée avec succès.', schema, table), 'ok'),
             self._load_postgis_tables(),
         ))
         self._import_worker.error.connect(lambda e: (
             self._stop_loading(),
             self.btn_import_pg.setEnabled(True),
-            self._log(f'Erreur import : {e}', 'error'),
+            self._log(tr('Erreur import : {0}', e), 'error'),
         ))
         self._suivre(self._import_worker)
         self._import_worker.start()
@@ -3520,7 +4724,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         if not self.session.is_connected():
             return
         path = self._current_path
-        self._start_loading(f'Chargement de {path}…')
+        self._start_loading(tr('Chargement de {0}…', path))
         self._list_worker = ListFilesWorker(self.session, path)
         self._list_worker.finished.connect(self._on_files_loaded)
         self._list_worker.error.connect(self._on_files_error)
@@ -3533,15 +4737,36 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         self._populate_tree(files)
         self.lbl_path.setText(self._current_path)
         self.btn_back.setEnabled(self._current_path != '/')
-        self._log(f'{len(files)} élément(s) chargé(s).')
+        self._suggerer_destination()
+        self._log(tr('{0} élément(s) chargé(s).', len(files)))
+
+    def _suggerer_destination(self, force=False):
+        """Propose de publier dans le dossier ou l'on se trouve.
+
+        La destination etait suggeree une seule fois, a l'ouverture du
+        projet, et valait la racine. Descendre dans un dossier n'y changeait
+        rien : le projet repartait a la racine sans que le champ, pourtant
+        sous les yeux, n'ait bouge.
+
+        Un fichier choisi d'un clic reste prioritaire — c'est une decision,
+        pas une suggestion — jusqu'a ce qu'on change de dossier.
+        """
+        nom = os.path.basename(QgsProject.instance().fileName() or '')
+        if not nom:
+            return
+        if self._dest_choisie and not force:
+            return
+        dossier = (self._current_path or '/').rstrip('/')
+        self.txt_publish_dest.setText('{}/{}'.format(dossier, nom))
 
     def _on_files_error(self, msg):
         self._stop_loading()
-        self._log(f'Impossible de lister les fichiers : {msg}', 'error')
+        self._log(tr('Impossible de lister les fichiers : {0}', msg), 'error')
 
     def _nav_back(self):
         if self._path_history:
             self._current_path = self._path_history.pop()
+            self._entrer_dans_dossier()
             self._load_files()
 
     # Couleurs de badge par extension
@@ -3558,7 +4783,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
         '.png':    ('image',     '#d35400'),
         '.jpg':    ('image',     '#d35400'),
         '.jpeg':   ('image',     '#d35400'),
-        '.pdf':    ('file-text', '#c0392b'),
+        '.pdf':    ('file-text', '#B91C1C'),
         '.zip':    ('archive',   '#7f8c8d'),
         '.csv':    ('file-text', '#27ae60'),
         '.xlsx':   ('file-text', '#27ae60'),
@@ -3592,7 +4817,18 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
             ico = _file_icon(name, is_dir)
 
             if is_dir:
-                size_str = '—'
+                # Un dossier n'a pas de taille propre : la calculer voudrait
+                # dire parcourir tout son contenu, dossier par dossier, a
+                # chaque affichage. Le serveur, lui, a compte ses elements
+                # en le listant : c'est ce compte qu'on montre.
+                enfants = f.get('enfants')
+                if enfants is None:
+                    size_str = '·'
+                elif enfants == 0:
+                    size_str = 'vide'
+                else:
+                    size_str = tr('{} élément{}').format(
+                        enfants, 's' if enfants > 1 else '')
             else:
                 size_str = (
                     f'{size / 1_048_576:.1f} MB' if size > 1_048_576
@@ -3600,8 +4836,12 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                     else f'{size} B'
                 )
             try:
-                date_str = datetime.fromtimestamp(mtime).strftime('%d/%m/%Y')
-            except Exception:
+                # L'heure compte autant que la date : on republie plusieurs
+                # fois le meme projet dans une journee, et la seule date ne
+                # disait pas laquelle des versions etait en ligne.
+                date_str = datetime.fromtimestamp(mtime).strftime('%d/%m/%Y %H:%M')
+            except Exception as e:
+                journal.ignorer(e, 'date de modification illisible')
                 date_str = ''
 
             item = QTreeWidgetItem([name, size_str, date_str])
@@ -3621,7 +4861,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
     # Loader
     # ══════════════════════════════════════════════════════════════════
 
-    def _start_loading(self, msg='En cours…'):
+    def _start_loading(self, msg=tr('En cours…')):
         self._busy_count += 1
         self._loader_msg = msg
         self._spinner_idx = 0
@@ -3639,7 +4879,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
     def _tick_spinner(self):
         c = self._spinner_chars[self._spinner_idx % len(self._spinner_chars)]
-        self._loader_lbl.setText(f'{c}  {getattr(self, "_loader_msg", "En cours…")}')
+        self._loader_lbl.setText(tr('{0}  {1}', c, getattr(self, "_loader_msg", "En cours…")))
         self._spinner_idx += 1
 
     def _refresh_auth_state(self):
@@ -3650,7 +4890,7 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
 
         if connected:
             name = self.session.instance_name
-            self.lbl_status.setText(f'● {name}')
+            self.lbl_status.setText(tr('● {0}', name))
             # --color-success-bg / text sur fond sombre → teinte claire
             self.lbl_status.setStyleSheet(
                 f'font-size: 13px; font-weight: 600; color: {_C_SUCCESS_BG};'
@@ -3658,25 +4898,35 @@ QPushButton:disabled {{ color: {_C_FAINT}; border-color: {_C_BORDER}; background
                 f'border-radius: 9999px; border: 1px solid rgba(16,185,129,.4);'
             )
         elif auth:
-            self.lbl_status.setText('● Authentifié')
+            self.lbl_status.setText(tr('● Authentifié'))
             self.lbl_status.setStyleSheet(
                 f'font-size: 13px; font-weight: 500; color: {_C_WARN_BG};'
                 f'padding: 4px 12px; background: rgba(245,158,11,.2);'
                 f'border-radius: 9999px; border: 1px solid rgba(245,158,11,.4);'
             )
         else:
-            self.lbl_status.setText('○ Non connecté')
+            self.lbl_status.setText(tr('○ Non connecté'))
             self.lbl_status.setStyleSheet(
                 'font-size: 13px; font-weight: 400; color: rgba(255,255,255,.5);'
                 'padding: 4px 10px; background: rgba(255,255,255,.06);'
                 'border-radius: 9999px; border: 1px solid rgba(255,255,255,.12);'
             )
 
-    def _log(self, msg, level='info'):
+    def _log(self, msg, level='info', deployer=True):
+        """Ecrit dans le journal.
+
+        `deployer` a False pour une erreur deja montree ailleurs : le
+        rapport de validation, par exemple, affiche ses signalements dans
+        son propre panneau. Deplier le journal par-dessus n'apprend rien
+        et pousse le panneau hors de l'ecran.
+        """
         # Une erreur ne doit pas passer inapercue parce que le journal
         # etait replie : on le deploie pour la montrer.
-        if level == 'error' and getattr(self, '_journal_replie', False):
-            self._basculer_journal()
+        if deployer and level == 'error' and getattr(self, '_journal_replie', False):
+            # Deploye pour cette fois, sans retenir le choix : passer par
+            # _basculer_journal() enregistrait l'etat, et la premiere
+            # erreur venue faisait du journal ouvert le nouveau defaut.
+            self._appliquer_etat_journal(False)
         ts = datetime.now().strftime('%H:%M:%S')
         # Couleurs issues du design system
         colors = {
@@ -3706,18 +4956,83 @@ def _btn(label: str, icon_name: str, icon_color: str, style: str) -> QPushButton
     return b
 
 
+class _Lignes:
+    """Formulaire en pile de lignes (libellé à largeur fixe + champ)."""
+
+    def __init__(self, parent):
+        self.pile = QVBoxLayout(parent)
+        self.pile.setSpacing(12)
+
+    def addRow(self, libelle, champ):
+        ligne = QWidget()
+        h = QHBoxLayout(ligne)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(12)
+        if not isinstance(libelle, QLabel):
+            libelle = QLabel(libelle)
+        libelle.setFixedWidth(110)
+        libelle.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(libelle)
+        h.addWidget(champ, 1)
+        self.pile.addWidget(ligne)
+        return ligne
+
+
 def _form_label(text: str) -> QLabel:
     """Styled form row label."""
-    lbl = QLabel(text + ' :')
+    lbl = QLabel(tr('{0} :', text))
     lbl.setStyleSheet(f'color: {_C_TEXT}; font-size: 12px; font-weight: 500;')
     lbl.setMinimumWidth(100)
     return lbl
+
+
+def _version_du_plugin():
+    """Lit la version dans metadata.txt, seule source qui fasse foi.
+
+    Le bandeau affichait « v2 » en dur : il ne bougeait plus depuis
+    longtemps et ne disait donc rien de ce qui tournait. Si le fichier
+    est illisible, mieux vaut ne rien affirmer qu'annoncer une version
+    fausse.
+    """
+    import configparser
+
+    chemin = os.path.join(os.path.dirname(__file__), 'metadata.txt')
+    lecteur = configparser.ConfigParser()
+    try:
+        lecteur.read(chemin, encoding='utf-8')
+        return lecteur.get('general', 'version').strip()
+    except Exception as e:
+        journal.ignorer(e, 'lecture de la version du plugin')
+        return '?'
+
+
+def _liste_deroulante(combo):
+    """Prepare une liste deroulante propre.
+
+    La liste native de Windows ignore les regles ::item de la feuille de
+    style : il faut une vue Qt pour qu'elles prennent. Cette vue vit dans
+    un conteneur — une fenetre surgissante — qui dessine son propre cadre ;
+    c'est a lui qu'on donne l'apparence, sinon deux bordures se
+    superposent.
+    """
+    vue = QListView()
+    combo.setView(vue)
+    conteneur = vue.parentWidget()
+    if conteneur is not None:
+        conteneur.setStyleSheet(
+            'background: {}; border: 1px solid {}; border-radius: 8px;'.format(
+                _C_CARD, _C_BORDER)
+        )
+    return combo
 
 
 def _input_with_icon(placeholder: str,
                      password: bool = False) -> QLineEdit:
     """QLineEdit — the icon is purely decorative (added as left padding via CSS)."""
     w = QLineEdit()
+    # Le remplissage de la feuille de style ne protege pas d'un ecrasement :
+    # sans plancher explicite, un champ serre rend son texte illisible.
+    w.setMinimumHeight(36)
     w.setPlaceholderText(placeholder)
     if password:
         w.setEchoMode(QLineEdit.EchoMode.Password)

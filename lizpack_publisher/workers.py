@@ -18,6 +18,7 @@ workers.py
 QThreads non-bloquants pour les opérations longues.
 """
 import io
+from .i18n import tr
 import os
 import shutil
 import zipfile
@@ -92,7 +93,7 @@ def parse_qgs_xml(xml_text):
             pile[-1].text += donnees
 
     def refuser_entite(*_args, **_kwargs):
-        raise ErreurXml("Declaration d'entite XML interdite")
+        raise ErreurXml(tr("Declaration d'entite XML interdite"))
 
     analyseur = xml.parsers.expat.ParserCreate(None, '}')
     analyseur.EntityDeclHandler = refuser_entite
@@ -108,7 +109,7 @@ def parse_qgs_xml(xml_text):
         raise ErreurXml(str(exc))
 
     if racine is None:
-        raise ErreurXml('document vide')
+        raise ErreurXml(tr('document vide'))
     return racine
 
 
@@ -221,20 +222,19 @@ class DownloadProjectWorker(QThread):
                 data = self.session.download(self.file_id)
                 with open(self.local_path, 'wb') as f:
                     f.write(data)
-                self.status.emit(f'  ✓ {os.path.basename(self.local_path)} téléchargé')
+                self.status.emit(tr('  ✓ {0} téléchargé', os.path.basename(self.local_path)))
                 try:
                     self.session.clear_cache()
                     n = self._miroir_dossier(server_dir, local_dir)
-                    self.status.emit(f'  {n} fichier(s) rapatrié(s) depuis {server_dir}')
+                    self.status.emit(tr('  {0} fichier(s) rapatrié(s) depuis {1}', n, server_dir))
                 except Exception as e:
-                    self.status.emit(f'Avertissement arborescence : {e}')
+                    self.status.emit(tr('Avertissement arborescence : {0}', e))
 
             # 3. Valider l'intégrité du téléchargement
             missing = self._validate_download()
             if missing:
                 self.status.emit(
-                    f'⚠ {len(missing)} fichier(s) manquant(s) :\n'
-                    + '\n'.join(f'  · {m}' for m in missing)
+                    tr('⚠ {0} fichier(s) manquant(s) :\n{1}', len(missing), '\n'.join(f'  · {m}' for m in missing))
                 )
 
             self.finished.emit(self.local_path)
@@ -256,22 +256,22 @@ class DownloadProjectWorker(QThread):
         try:
             items = self.session.list_files(server_dir)
         except Exception as e:
-            self.status.emit(f'  dossier illisible ({e})')
+            self.status.emit(tr('  dossier illisible ({0})', e))
             return False
 
         ids = [it['id'] for it in items]
         if not ids:
             return False
 
-        self.status.emit(f'  {len(ids)} élément(s) — récupération en une archive…')
+        self.status.emit(tr('  {0} élément(s) : récupération en une archive…', len(ids)))
         try:
             brut = self.session.download_folder_zip(ids)
         except Exception as e:
-            self.status.emit(f'  archive indisponible ({e}) — repli fichier par fichier')
+            self.status.emit(tr('  archive indisponible ({0}) : repli fichier par fichier', e))
             return False
 
         if not brut or brut[:2] != b'PK':
-            self.status.emit('  réponse inattendue — repli fichier par fichier')
+            self.status.emit(tr('  réponse inattendue : repli fichier par fichier'))
             return False
 
         prefixe = server_dir.strip('/')
@@ -292,7 +292,7 @@ class DownloadProjectWorker(QThread):
                     # Une archive peut contenir des chemins remontants : ne
                     # jamais ecrire hors du dossier de destination.
                     if cible != racine and not cible.startswith(racine + os.sep):
-                        self.status.emit(f'  ⚠ entrée hors dossier ignorée : {nom}')
+                        self.status.emit(tr('  ⚠ entrée hors dossier ignorée : {0}', nom))
                         continue
 
                     os.makedirs(os.path.dirname(cible), exist_ok=True)
@@ -300,14 +300,14 @@ class DownloadProjectWorker(QThread):
                         shutil.copyfileobj(source, dest)
                     ecrits += 1
         except zipfile.BadZipFile as e:
-            self.status.emit(f'  archive illisible ({e}) — repli fichier par fichier')
+            self.status.emit(tr('  archive illisible ({0}) : repli fichier par fichier', e))
             return False
 
         if not os.path.isfile(self.local_path):
-            self.status.emit('  projet absent de l\'archive — repli fichier par fichier')
+            self.status.emit(tr("  projet absent de l'archive : repli fichier par fichier"))
             return False
 
-        self.status.emit(f'  {ecrits} fichier(s) rapatrié(s) en une requête')
+        self.status.emit(tr('  {0} fichier(s) rapatrié(s) en une requête', ecrits))
         return True
 
     def _miroir_dossier(self, server_dir, local_dir):
@@ -335,7 +335,7 @@ class DownloadProjectWorker(QThread):
             try:
                 items = self.session.list_files(srv)
             except Exception as e:
-                self.status.emit(f'  ⚠ dossier {srv} illisible — {e}')
+                self.status.emit(tr('  ⚠ dossier {0} illisible : {1}', srv, e))
                 continue
 
             os.makedirs(loc, exist_ok=True)
@@ -352,9 +352,9 @@ class DownloadProjectWorker(QThread):
                     with open(cible, 'wb') as f:
                         f.write(contenu)
                     ecrits += 1
-                    self.status.emit(f'  ↳ {it["name"]} ({len(contenu)} octets)')
+                    self.status.emit(tr('  ↳ {0} ({1} octets)', it["name"], len(contenu)))
                 except Exception as e:
-                    self.status.emit(f'  ⚠ {it["name"]} — {e}')
+                    self.status.emit(tr('  ⚠ {0} : {1}', it["name"], e))
 
         return ecrits
 
@@ -468,8 +468,7 @@ class SaveSymbologyWorker(QThread):
                     # une AttributeError dans rewrite_pg().
                     upload_path = self.local_path
                     self.status.emit(
-                        f'  ⚠ connexions PostGIS NON réécrites ({e}). '
-                        'Le projet publié gardera ses adresses locales.'
+                        tr('  ⚠ connexions PostGIS NON réécrites ({0}). Le projet publié gardera ses adresses locales.', e)
                     )
 
             # Tout part en UNE requete. Un envoi par fichier faisait payer la
@@ -484,10 +483,19 @@ class SaveSymbologyWorker(QThread):
             if os.path.isfile(cfg_local):
                 envois.append((cfg_local, nom_projet + '.cfg'))
 
+            # Le tableau de bord voyage avec son projet, comme le .cfg : il est
+            # nomme d'apres lui et le serveur le cherche a cote du .qgs. Publier
+            # le projet sans lui donnerait un tableau de bord fige sur l'ancienne
+            # definition, sans que rien ne le signale.
+            dash_local = os.path.splitext(self.local_path)[0] + '.qdash'
+            if os.path.isfile(dash_local):
+                envois.append(
+                    (dash_local, os.path.splitext(nom_projet)[0] + '.qdash'))
+
             if self.local_path.lower().endswith('.qgs'):
                 envois.extend(self._dependances_locales(local_dir))
 
-            self.status.emit(f'  {len(envois)} fichier(s) à publier…')
+            self.status.emit(tr('  {0} fichier(s) à publier…', len(envois)))
             try:
                 self.session.upload_batch(
                     envois, api_dir,
@@ -560,8 +568,7 @@ class SaveSymbologyWorker(QThread):
         if 'dbname=' not in contenu:
             return
         self.status.emit(
-            f'  ⚠ connexions PostGIS NON réécrites : {raison}. '
-            'Lizmap ne pourra pas joindre la base.'
+            tr('  ⚠ connexions PostGIS NON réécrites : {0}. Lizmap ne pourra pas joindre la base.', raison)
         )
 
     def _rewrite_pg_datasources(self):
@@ -575,7 +582,7 @@ class SaveSymbologyWorker(QThread):
         d = self.session._instance_data
         if not d:
             self._avertir_sans_reecriture(
-                "les informations de l'instance n'ont pas été récupérées"
+                tr("les informations de l'instance n'ont pas été récupérées")
             )
             return self.local_path
 
@@ -588,7 +595,7 @@ class SaveSymbologyWorker(QThread):
 
         if not target_host or not target_user:
             self._avertir_sans_reecriture(
-                "l'instance n'expose ni adresse ni utilisateur de base"
+                tr("l'instance n'expose ni adresse ni utilisateur de base")
             )
             return self.local_path
 
@@ -637,6 +644,28 @@ class SaveSymbologyWorker(QThread):
         tmp.write(content)
         tmp.close()
         return tmp.name
+
+
+class ValidationWorker(QThread):
+    """Fait examiner un projet par le serveur, sans rien publier."""
+    finished = pyqtSignal(dict)
+    error    = pyqtSignal(str)
+
+    def __init__(self, session, local_path=None, file_id=None):
+        super().__init__()
+        self.session = session
+        self.local_path = local_path
+        self.file_id = file_id
+
+    def run(self):
+        try:
+            rapport = self.session.valider_projet(
+                local_path=self.local_path, file_id=self.file_id)
+            if not isinstance(rapport, dict):
+                raise Exception(tr("Réponse inattendue du serveur."))
+            self.finished.emit(rapport)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class DeleteWorker(QThread):
@@ -762,26 +791,86 @@ class _FilBase(QThread):
 
 
 class DiagnosticDbWorker(_FilBase):
-    """Analyse la base sans rien y modifier."""
+    """Demande le diagnostic au serveur LizPack. Aucune ecriture.
+
+    Le plugin n'analyse plus la base lui-meme : le controle vit cote serveur,
+    en un seul exemplaire. Il continue en revanche d'APPLIQUER les corrections
+    en direct — voir OptimiserDbWorker.
+    """
     finished = pyqtSignal(list)   # [Probleme]
     status   = pyqtSignal(str)
     error    = pyqtSignal(str)
 
+    def __init__(self, pg, session=None):
+        super().__init__(pg)
+        self.session = session
+
+    def run(self):
+        try:
+            from .optimisation import diagnostiquer_par_api
+            if self.session is None:
+                self.error.emit(
+                    tr("Connexion a LizPack indisponible : le diagnostic ne peut "
+                    'pas etre demande.')
+                )
+                return
+            problemes = diagnostiquer_par_api(
+                self.session, avancement=self.status.emit)
+            self.finished.emit(problemes)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ListerTablesWorker(_FilBase):
+    """Liste les tables de la base, hors du fil graphique.
+
+    Cette requete tournait dans le fil de l'interface, connexion comprise.
+    Le temps qu'elle prenne — jusqu'a dix secondes rien que pour la
+    connexion —, QGIS ne repondait plus, Windows le declarait bloque et
+    l'utilisateur le fermait de force. Ce n'etait pas un plantage, mais
+    cela y ressemblait de tres pres.
+    """
+    finished = pyqtSignal(list)
+    manquant = pyqtSignal()      # psycopg2 absent : repli sur le fournisseur
+    error    = pyqtSignal(str)
+
+    REQUETE = """SELECT
+                    c.relname  AS table_name,
+                    n.nspname  AS table_schema,
+                    MAX(CASE WHEN t.typname IN ('geometry','geography')
+                             THEN a.attname END)  AS geom_col,
+                    COALESCE(
+                        (SELECT srid FROM geometry_columns g
+                         WHERE g.f_table_schema = n.nspname
+                           AND g.f_table_name   = c.relname
+                         LIMIT 1),
+                        0
+                    )                             AS srid
+                FROM pg_class      c
+                JOIN pg_namespace  n ON c.relnamespace = n.oid
+                LEFT JOIN pg_attribute a ON a.attrelid = c.oid
+                                        AND a.attnum > 0
+                                        AND NOT a.attisdropped
+                LEFT JOIN pg_type  t ON a.atttypid = t.oid
+                WHERE c.relkind IN ('r', 'v', 'm')
+                  AND n.nspname NOT IN (
+                        'pg_catalog','information_schema',
+                        'topology','tiger','tiger_data','public','lizmap'
+                      )
+                GROUP BY c.relname, n.nspname
+                ORDER BY n.nspname, c.relname"""
+
     def run(self):
         connexion = None
         try:
-            from .optimisation import diagnostiquer
-            self.status.emit('Connexion à la base…')
             connexion = self._connexion()
             curseur = connexion.cursor()
-            problemes = diagnostiquer(curseur, journal=self.status.emit)
+            curseur.execute(self.REQUETE)
+            lignes = curseur.fetchall()
             curseur.close()
-            self.finished.emit(problemes)
+            self.finished.emit(list(lignes))
         except ImportError:
-            self.error.emit(
-                'psycopg2 est absent de cette installation de QGIS : '
-                "le diagnostic de la base n'est pas disponible."
-            )
+            self.manquant.emit()
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -789,7 +878,7 @@ class DiagnosticDbWorker(_FilBase):
                 try:
                     connexion.close()
                 except Exception as e:
-                    journal.ignorer(e, 'fermeture de la connexion a la base')
+                    journal.ignorer(e, 'fermeture de la connexion de listage')
 
 
 class OptimiserDbWorker(_FilBase):
@@ -806,10 +895,10 @@ class OptimiserDbWorker(_FilBase):
         connexion = None
         try:
             from .optimisation import appliquer
-            self.status.emit('Connexion à la base…')
+            self.status.emit(tr('Connexion à la base…'))
             connexion = self._connexion()
             reussies, echouees = appliquer(
-                connexion, self.problemes, journal=self.status.emit,
+                connexion, self.problemes, avancement=self.status.emit,
             )
             self.finished.emit(reussies, echouees)
         except Exception as e:
@@ -857,7 +946,7 @@ class ImportToPostGISWorker(QThread):
             )
 
             if error != QgsVectorLayerExporter.ExportError.NoError:
-                raise Exception(msg or f'Erreur export (code {error})')
+                raise Exception(msg or tr('Erreur export (code {0})', error))
 
             self.finished.emit()
         except Exception as e:

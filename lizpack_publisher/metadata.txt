@@ -2,7 +2,7 @@
 name=LizPack Publisher
 qgisMinimumVersion=3.16
 description=Manage your QGIS projects directly from your LizPack instance
-version=1.1.1
+version=1.4.0
 author=LizPack - GEODONNÉE INC
 email=support@lizpack.com
 about=Browse, open and publish QGIS projects hosted on a LizPack instance without leaving QGIS. Manage remote files, add PostGIS layers from your instance database, and run a read-only health check that reports missing spatial indexes, unusable primary keys, stale statistics and oversized geometries — with safe, reversible one-click fixes. The plugin talks to the LizPack API over HTTPS and requires a LizPack account.
@@ -17,7 +17,71 @@ experimental=False
 deprecated=False
 hasProcessingProvider=False
 server=False
-changelog=1.1.1 (2026-09-05)
+changelog=1.4.0 (2026-11-09)
+    Four languages and LizPack Enterprise
+    - Interface in French, English, Spanish and Portuguese, with a language
+      selector in the header; server messages and the diagnostic export are
+      translated too.
+    - Connection to a LizPack Enterprise portal with an API token: files,
+      chunked uploads, validation and PostGIS layers.
+    - Read-only token: validation allowed, write actions greyed out; they
+      come back as soon as a write token is used.
+    - Protected projects open to their owner and to the update group.
+    - Redesigned Connection tab; the PostGIS banner gives the real reason.
+    - "Fix in QGIS" after a validation.
+    - Validation: basemaps (WMS, XYZ, WMTS, WCS, vector tiles, ArcGIS) no
+      longer count in the mixed projections check.
+    1.3.0 (2026-10-21)
+    Faster, sturdier publishing
+    - Data goes straight to the server that hosts the instance, when it
+      serves its own files. Projects are still validated by LizPack first.
+    - Files already up to date on the server are not sent again.
+    - A modified GeoPackage only sends the 4 MB blocks that changed.
+    - GeoPackage, Shapefile and CSV are compressed on the way (2 to 3 times
+      fewer bytes).
+    - A lost request is retried, and an interrupted upload resumes where it
+      stopped. Every block is checked on arrival.
+    - Large uploads no longer fail on slow connections.
+    1.2.0 (2026-09-08)
+    New
+    - Validate a project before publishing, without uploading anything: the
+      server checks database connections, primary keys, spatial indexes,
+      projections, expressions, local paths and print layouts, and returns a
+      report sorted by severity. Available from the publish panel, or from a
+      right click on a project already on the instance.
+    - A project whose layers do not share one coordinate system is refused by
+      the server. The plugin now offers to reproject them at the moment the
+      refusal would happen, in place and under the same name, with a
+      "<project>.qgs.bak" backup.
+    - PostGIS layers are reconnected when a project is opened: a published
+      project carries the internal address of the database and used to open
+      with empty layers. The password goes to the QGIS authentication store,
+      never in clear text in the project file.
+    - The dashboard definition (.qdash) is published together with its project.
+    - The Projects tab is now split in two: file manager, and project
+      validation.
+    - Refresh button: asks the server again for this instance's database
+      credentials, quota, permissions and files, without disconnecting.
+    - Folders show how many items they hold; the Modified column shows the
+      time as well as the date.
+    - The publish destination follows the folder you are in.
+    - Copy the log to the clipboard in one click.
+    Fixes
+    - Loading the PostGIS table list froze QGIS: the query ran in the
+      interface thread, connection included.
+    - The registered PostgreSQL connection could not reuse its saved password,
+      and the browser reported "connection failed".
+    - Disconnecting now removes every connection the plugin has registered,
+      including those left by an earlier session.
+    - A minimised window did not come back when clicking the plugin icon.
+    - Tabs no longer crush their content on a short window, and tab labels are
+      no longer clipped.
+    - The log is always collapsed on opening, closes on a click elsewhere, and
+      a validation report no longer unfolds it over itself.
+    Note
+    - Validation and database health need a LizPack server that provides them.
+      Where it does not, the plugin says so plainly instead of failing.
+  1.1.1 (2026-09-05)
     Critical fixes
     - QGIS crashed when connecting to an instance: the browser tree was
       rebuilt while QGIS was using it.

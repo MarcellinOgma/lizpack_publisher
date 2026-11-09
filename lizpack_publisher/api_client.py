@@ -21,17 +21,21 @@ Flow en 2 étapes :
   2. connect_instance() → valide l'accès à l'instance
 """
 import json
+from .i18n import tr, tr_serveur, LANGUE
 import os
+import zipfile
 import mimetypes
 import uuid
 import datetime
 import http.client
 import ssl
+import time
 from urllib.parse import urlparse, urlencode
 
 from qgis.PyQt.QtCore import QSettings
 
 from . import journal
+from .envoi_worker import EnvoiWorker, est_projet
 
 
 # ── Changer cette constante pour passer en production ──────────────────────
@@ -198,6 +202,9 @@ class LizpackSession:
                 'modified': ts,
                 'api_path': item['path'],
                 'is_dir':   item.get('is_folder', False),
+                # Le serveur compte les elements d'un dossier sur le disque
+                # pendant qu'il le liste, sur une connexion deja ouverte.
+                'enfants':  item.get('children_count'),
             })
         return results
 
@@ -257,40 +264,15 @@ class LizpackSession:
         for item in items:
             if item['name'] == fname and not item['is_dir']:
                 return self.download(item['id'])
-        raise Exception(f'Fichier introuvable : {server_path}')
+        raise Exception(tr('Fichier introuvable : {0}', server_path))
 
     def upload_file(self, local_path, api_path):
-        """Upload un fichier local vers api_path (chemin absolu, ex: /mon/dossier/fichier.qgs).
-        Lève une exception si le backend refuse le fichier (validation QGS, extension bloquée…).
+        """Envoie un fichier local vers api_path (chemin absolu, ex: /mon/dossier/fichier.qgs).
+        Lève une exception si le serveur refuse le fichier (validation QGS, extension bloquée…).
         """
-        filename    = os.path.basename(local_path)
-        parts       = api_path.strip('/').split('/')
-        parent_parts = parts[:-1]
-        parent      = ('/' + '/'.join(parent_parts)) if parent_parts else '/'
-
-        with open(local_path, 'rb') as f:
-            content = f.read()
-
-        resp = self._api_multipart(
-            f'/api/instances/{self._instance_id}/files/upload_file/',
-            fields={'parent_path': parent},
-            files={'files': (filename, content)},
-        )
-
-        # Vérifier si le backend a bloqué le fichier
-        if resp and isinstance(resp, dict):
-            blocked = resp.get('blocked_files', [])
-            if blocked:
-                reasons = []
-                for bf in blocked:
-                    name = bf.get('name', filename)
-                    reason = bf.get('reason', 'Refusé par le serveur')
-                    details = bf.get('details', [])
-                    msg = f'{name} : {reason}'
-                    if details:
-                        msg += '\n  - ' + '\n  - '.join(details)
-                    reasons.append(msg)
-                raise Exception('\n'.join(reasons))
+        parts = api_path.strip('/').split('/')
+        parent = ('/' + '/'.join(parts[:-1])) if parts[:-1] else '/'
+        self._envoyer_entrees([(local_path, parts[-1])], parent)
 
     @staticmethod
     def _human_size(nbytes):
@@ -301,40 +283,126 @@ class LizpackSession:
         return f'{nbytes:.1f} To'
 
     def upload_batch(self, file_entries, parent_path, progress_cb=None):
-        """Upload tous les fichiers en UNE seule requête HTTP (comme le frontend).
+        """Envoie des fichiers.
 
         file_entries : list[(local_path, rel_path)]
         parent_path  : dossier parent sur le serveur (ex: '/')
-        progress_cb  : callback(current, total, filename_with_size)
+        progress_cb  : callback(current, total, texte)
         """
-        total = len(file_entries)
-        if total == 0:
+        if not file_entries:
             return 0
+        return self._envoyer_entrees(list(file_entries), parent_path, progress_cb)
 
-        # Lire tous les fichiers et construire le file_list
-        file_list = []
-        total_size = 0
-        for i, (local_path, rel_path) in enumerate(file_entries):
-            fname = os.path.basename(local_path)
-            fsize = os.path.getsize(local_path)
-            total_size += fsize
+    def _envoyer_entrees(self, entrees, parent_path, progress_cb=None):
+        """Les données vont directement au serveur de l'instance quand il les
+        sert (envoi_worker.py : fichiers à jour ignorés, blocs changés seuls,
+        compression, reprise) ; sinon au central, en requêtes courtes. Les
+        projets QGIS passent toujours par le central, qui les valide, et
+        partent après leurs données."""
+        projets = [e for e in entrees if est_projet(e[1])]
+        donnees = [e for e in entrees if not est_projet(e[1])]
+        envoi = EnvoiWorker.ouvrir(self) if donnees else None
+        echecs = 0
+        try:
+            if donnees:
+                if envoi:
+                    envoi.envoyer(parent_path, donnees, progress_cb)
+                else:
+                    self._envoyer_central(donnees, parent_path, progress_cb)
+            if projets:
+                if progress_cb:
+                    progress_cb(len(entrees) - len(projets), len(entrees),
+                                tr('Validation et envoi de {0} projet(s)…', len(projets)))
+                self._envoyer_central(projets, parent_path, None)
+        except Exception:
+            echecs = 1
+            raise
+        finally:
+            if envoi:
+                envoi.remettre_mesure(echecs)
+        return len(entrees)
+
+    # Une requête qui dure plus d'une minute et demie environ est coupée en
+    # route : vers le central, les lots restent petits, et un gros fichier
+    # part par morceaux.
+    LOT_CENTRAL = 8 * 1024 * 1024
+
+    def _envoyer_central(self, entrees, parent_path, progress_cb=None):
+        total, fait = len(entrees), 0
+        lot, octets = [], 0
+
+        def vider():
+            nonlocal lot, octets, fait
+            if not lot:
+                return
+            file_list = []
+            for local_path, rel_path in lot:
+                with open(local_path, 'rb') as f:
+                    file_list.append((os.path.basename(rel_path), f.read(), rel_path))
+            resp = self._api_multipart(
+                f'/api/instances/{self._instance_id}/files/upload_file/',
+                fields={'parent_path': parent_path}, files={}, file_list=file_list,
+            )
+            self._lever_si_bloque(resp)
+            fait += len(lot)
             if progress_cb:
-                progress_cb(i + 1, total, f'Lecture {fname} ({self._human_size(fsize)})')
-            with open(local_path, 'rb') as f:
-                content = f.read()
-            file_list.append((fname, content, rel_path))
+                progress_cb(fait, total, tr('{0} / {1} fichier(s) envoyé(s)', fait, total))
+            lot, octets = [], 0
 
-        # Envoyer tout en une seule requête
-        if progress_cb:
-            progress_cb(total, total, f'Envoi de {total} fichier(s) ({self._human_size(total_size)})…')
+        for local_path, rel_path in entrees:
+            taille = os.path.getsize(local_path)
+            if taille > self.LOT_CENTRAL:
+                vider()
+                if progress_cb:
+                    progress_cb(fait, total, f'{os.path.basename(rel_path)} ({self._human_size(taille)})…')
+                self._envoyer_central_par_morceaux(local_path, rel_path, parent_path)
+                fait += 1
+                continue
+            if octets + taille > self.LOT_CENTRAL or len(lot) >= 200:
+                vider()
+            lot.append((local_path, rel_path))
+            octets += taille
+        vider()
 
-        resp = self._api_multipart(
-            f'/api/instances/{self._instance_id}/files/upload_file/',
-            fields={'parent_path': parent_path},
-            files={},
-            file_list=file_list,
-        )
+    def _envoyer_central_par_morceaux(self, local_path, rel_path, parent_path):
+        base = f'/api/instances/{self._instance_id}/files'
+        d = self._api('POST', f'{base}/upload_init/', data=json.dumps({
+            'file_name': os.path.basename(rel_path), 'file_size': os.path.getsize(local_path),
+            'file_path': rel_path, 'parent_path': parent_path, 'compressed': False,
+        }).encode())
+        identifiant = d['upload_id']
+        with open(local_path, 'rb') as f:
+            i = 0
+            while True:
+                morceau = f.read(self.LOT_CENTRAL)
+                if not morceau and i:
+                    break
+                frontiere = uuid.uuid4().hex
+                entete = (
+                    f'--{frontiere}\r\nContent-Disposition: form-data; name="upload_id"\r\n\r\n{identifiant}\r\n'
+                    f'--{frontiere}\r\nContent-Disposition: form-data; name="chunk_index"\r\n\r\n{i}\r\n'
+                    f'--{frontiere}\r\nContent-Disposition: form-data; name="chunk"; filename="chunk_{i}"\r\n'
+                    f'Content-Type: application/octet-stream\r\n\r\n'
+                )
+                corps = entete.encode() + morceau + f'\r\n--{frontiere}--\r\n'.encode()
+                for essai in range(4):
+                    try:
+                        self._request('POST', f'{base}/upload_chunk/', body=corps, extra_headers={
+                            'Content-Type': f'multipart/form-data; boundary={frontiere}',
+                            'Accept': 'application/json'})
+                        break
+                    except Exception:
+                        if essai == 3:
+                            raise
+                        time.sleep(2 ** essai)
+                i += 1
+                if not morceau:
+                    break
+        resp = self._api('POST', f'{base}/upload_finalize/', data=json.dumps({'upload_id': identifiant}).encode())
+        self._lever_si_bloque(resp)
 
+    @staticmethod
+    def _lever_si_bloque(resp):
         if resp and isinstance(resp, dict):
             blocked = resp.get('blocked_files', [])
             if blocked:
@@ -346,8 +414,6 @@ class LizpackSession:
                         msg += '\n  - ' + '\n  - '.join(details)
                     reasons.append(msg)
                 raise Exception('\n'.join(reasons))
-
-        return total
 
     def _ensure_remote_dir(self, remote_path):
         """S'assure qu'un dossier distant existe en BDD.
@@ -378,67 +444,26 @@ class LizpackSession:
             current = current.rstrip('/') + '/' + part
 
     def upload_folder(self, local_folder, api_dest, progress_cb=None):
-        """Upload un dossier entier. Crée l'arborescence distante puis upload les fichiers."""
+        """Envoie un dossier entier, sous-dossiers compris."""
         self.clear_cache()
         folder_name = os.path.basename(local_folder)
         remote_root = api_dest.rstrip('/') + '/' + folder_name
 
-        # Créer le dossier racine
+        # Le dossier racine existe même vide
         self._ensure_remote_dir(remote_root)
 
-        # Collecter les fichiers et sous-dossiers
         entries = []
-        # Collecter tous les fichiers avec leurs chemins relatifs
         for root, dirs, files in os.walk(local_folder):
             dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
             for fname in files:
                 if fname.startswith('.'):
                     continue
                 local = os.path.join(root, fname)
-                # Chemin relatif incluant le nom du dossier racine
                 rel = folder_name + '/' + os.path.relpath(local, local_folder).replace('\\', '/')
                 entries.append((local, rel))
-
         if not entries:
             return 0
-
-        # Tout envoyer en UNE seule requête (comme le frontend)
-        total = len(entries)
-        file_list = []
-        total_size = 0
-        for i, (local_path, rel_path) in enumerate(entries):
-            fname = os.path.basename(local_path)
-            fsize = os.path.getsize(local_path)
-            total_size += fsize
-            if progress_cb:
-                progress_cb(i + 1, total, f'Lecture {fname} ({self._human_size(fsize)})')
-            with open(local_path, 'rb') as f:
-                content = f.read()
-            file_list.append((fname, content, rel_path))
-
-        if progress_cb:
-            progress_cb(total, total, f'Envoi de {total} fichier(s) ({self._human_size(total_size)})…')
-
-        resp = self._api_multipart(
-            f'/api/instances/{self._instance_id}/files/upload_file/',
-            fields={'parent_path': api_dest},
-            files={},
-            file_list=file_list,
-        )
-
-        if resp and isinstance(resp, dict):
-            blocked = resp.get('blocked_files', [])
-            if blocked:
-                reasons = []
-                for bf in blocked:
-                    msg = f"{bf.get('name', '?')} : {bf.get('reason', 'Refusé')}"
-                    details = bf.get('details', [])
-                    if details:
-                        msg += '\n  - ' + '\n  - '.join(details)
-                    reasons.append(msg)
-                raise Exception('\n'.join(reasons))
-
-        return total
+        return self._envoyer_entrees(entries, api_dest, progress_cb)
 
     def replace_file(self, local_path, api_path):
         """Remplace (ou crée) un fichier distant."""
@@ -467,6 +492,58 @@ class LizpackSession:
         """Déplace des fichiers/dossiers vers un dossier destination."""
         data = json.dumps({'ids': file_ids, 'destination_path': destination_path}).encode()
         return self._api('POST', f'/api/instances/{self._instance_id}/files/move/', data=data)
+
+    def diagnostiquer_base(self, tables=None):
+        """Demande au serveur le diagnostic de la base de l'instance.
+
+        Le diagnostic vit desormais cote LizPack : deux implementations du
+        meme controle finissaient par diverger, et le plugin ne pourrait de
+        toute facon pas diagnostiquer sans le serveur, dont il tient les
+        identifiants de la base.
+
+        Rend la liste des signalements ; chacun porte sa commande SQL isolee,
+        que le plugin execute en se connectant en direct.
+        """
+        corps = json.dumps({'tables': tables} if tables else {}).encode()
+        reponse = self._api(
+            'POST',
+            f'/api/instances/{self._instance_id}/files/diagnose_database/',
+            data=corps,
+        )
+        if not isinstance(reponse, dict):
+            return []
+        return reponse.get('signalements', [])
+
+    def valider_projet(self, local_path=None, file_id=None):
+        """Soumet un projet a l'examen du serveur, sans rien publier.
+
+        Le serveur rend le meme rapport que celui du site : signalements
+        classes par gravite, plus le verdict sur les connexions
+        PostgreSQL, qui conditionne le depot. Rien n'est ecrit : le
+        fichier envoye est lu en memoire puis abandonne.
+
+        Un `.qgz` est une archive ; le validateur attend le projet
+        lui-meme, on en extrait donc le `.qgs`.
+        """
+        chemin = f'/api/instances/{self._instance_id}/files/validate_project/'
+        if not local_path:
+            data = json.dumps({'file_id': file_id}).encode()
+            return self._api('POST', chemin, data=data)
+
+        nom = os.path.basename(local_path)
+        if nom.lower().endswith('.qgz'):
+            with zipfile.ZipFile(local_path) as archive:
+                internes = [n for n in archive.namelist()
+                            if n.lower().endswith('.qgs')]
+                if not internes:
+                    raise Exception(tr("Ce .qgz ne contient aucun projet .qgs."))
+                contenu = archive.read(internes[0])
+            nom = nom[:-4] + '.qgs'
+        else:
+            with open(local_path, 'rb') as f:
+                contenu = f.read()
+
+        return self._api_multipart(chemin, fields={}, files={'file': (nom, contenu)})
 
     def get_postgis_uri(self):
         """Retourne les credentials PostGIS pour connexion externe (depuis QGIS Desktop)."""
@@ -498,7 +575,7 @@ class LizpackSession:
         data = json.dumps({'email': email, 'password': password}).encode()
         resp = self._api('POST', '/api/auth/jwt/create/', data=data, auth=False)
         if 'access' not in resp:
-            raise Exception('Identifiants incorrects.')
+            raise Exception(tr('Identifiants incorrects.'))
         return resp['access']
 
     def _get_instances(self):
@@ -545,6 +622,8 @@ class LizpackSession:
             'Referer':       self.api_base + '/',
             'Authorization': f'JWT {self._jeton}',
             'Connection':    'keep-alive',
+            # Le serveur LizPack répond dans cette langue (messages d'erreur).
+            'Accept-Language': LANGUE,
         }
 
     def _base_headers_avec_equipe(self):
@@ -573,14 +652,31 @@ class LizpackSession:
 
                 # Erreur HTTP — parser le message
                 try:
-                    msg = json.loads(data.decode()).get('detail') or json.loads(data.decode())
+                    d = json.loads(data.decode())
+                    # « detail » : le serveur LizPack ; « error » : le portail entreprise.
+                    msg = d.get('detail') or d.get('error') or d
                     if isinstance(msg, dict):
                         msg = str(msg)
+                    msg = tr_serveur(msg)
                 except Exception:
                     lines = [ln.strip() for ln in data.decode(errors='replace').splitlines()
                              if ln.strip() and not ln.strip().startswith('<')]
                     msg = lines[0] if lines else f'HTTP {resp.status}'
-                raise Exception(f'API {resp.status} : {msg}')
+                # Un 405 signifie que cette action n'existe pas sur le
+                # serveur interroge. Le dire a l'utilisateur en nommant la
+                # route, ou en parlant de version du backend, l'inquiete
+                # sans l'aider et expose l'interieur du produit : le detail
+                # part dans le journal de QGIS, a l'usage du support.
+                if resp.status == 405:
+                    journal.ignorer(
+                        'route absente : {} {}'.format(method, path),
+                        'fonction indisponible sur le serveur')
+                    raise Exception(
+                        tr("Cette fonctionnalite n'est pas encore disponible "
+                        'pour votre instance. Elle arrivera avec une '
+                        'prochaine mise a jour de LizPack.')
+                    )
+                raise Exception(tr('API {0} : {1}', resp.status, msg))
 
             except Exception as exc:
                 is_conn_error = isinstance(exc, (

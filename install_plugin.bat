@@ -1,71 +1,79 @@
 @echo off
 :: ============================================================
 :: install_plugin.bat
-:: Installe le plugin LIZPACK Publisher dans QGIS et installe
-:: la dépendance paramiko si nécessaire.
+::
+:: Fabrique les deux paquets — production et accept — et les
+:: installe cote a cote dans un profil QGIS.
+::
+::   install_plugin.bat              profil Formations
+::   install_plugin.bat default      autre profil
+::
+:: Tout le travail est fait par generer_paquets.py : ce fichier
+:: ne sert qu'a le lancer d'un double-clic, avec un Python valide.
 :: ============================================================
 
-setlocal
+setlocal enabledelayedexpansion
 
-set PLUGIN_SRC=%~dp0lizpack_publisher
-set QGIS_PLUGINS=%APPDATA%\QGIS\QGIS3\profiles\Formations\python\plugins
-set DEST=%QGIS_PLUGINS%\lizpack_publisher
+set PROFIL=%~1
+if "%PROFIL%"=="" set PROFIL=Formations
+
+set SCRIPT=%~dp0generer_paquets.py
 
 echo.
-echo === LIZPACK Publisher — Installation ===
+echo === LIZPACK Publisher — Installation (profil %PROFIL%) ===
 echo.
 
-:: 1. Copier le plugin
-echo [1/2] Copie du plugin vers %DEST%...
-if not exist "%QGIS_PLUGINS%" mkdir "%QGIS_PLUGINS%"
-if exist "%DEST%" rmdir /s /q "%DEST%"
-xcopy /e /i /q "%PLUGIN_SRC%" "%DEST%"
-if errorlevel 1 (
-    echo ERREUR lors de la copie.
+if not exist "%SCRIPT%" (
+    echo ERREUR : generer_paquets.py est introuvable a cote de ce fichier.
     pause
     exit /b 1
 )
-echo     OK
 
-:: 2. Installer paramiko via pip QGIS
-echo [2/2] Installation de paramiko...
-set QGIS_PYTHON=""
-
-:: Chercher python3 de QGIS dans les emplacements courants
+:: Chercher un Python. Celui de QGIS d'abord — c'est le seul dont on
+:: soit sur qu'il existe sur un poste ou QGIS est installe.
+set PY=
 for %%P in (
-    "C:\Program Files\QGIS 3.38\apps\Python312\python3.exe"
-    "C:\Program Files\QGIS 3.36\apps\Python312\python3.exe"
-    "C:\Program Files\QGIS 3.34\apps\Python312\python3.exe"
     "C:\OSGeo4W\apps\Python312\python3.exe"
     "C:\OSGeo4W\apps\Python311\python3.exe"
     "C:\OSGeo4W\bin\python3.exe"
+    "C:\Program Files\QGIS 3.44.8\apps\Python312\python3.exe"
+    "C:\Program Files\QGIS 3.38\apps\Python312\python3.exe"
+    "C:\Program Files\QGIS 3.36\apps\Python312\python3.exe"
+    "C:\Program Files\QGIS 3.34\apps\Python312\python3.exe"
 ) do (
-    if exist %%P (
-        set QGIS_PYTHON=%%P
-        goto :found_python
-    )
+    if not defined PY if exist %%P set PY=%%P
 )
 
-:found_python
-if %QGIS_PYTHON%=="" (
-    echo     ATTENTION : Python QGIS non trouvé automatiquement.
-    echo     Installez paramiko manuellement depuis la console Python QGIS :
+:: A defaut, le Python du PATH.
+if not defined PY (
+    where python >nul 2>&1 && set PY=python
+)
+
+if not defined PY (
+    echo ERREUR : aucun Python trouve.
+    echo Ouvrez l'invite OSGeo4W livree avec QGIS, puis lancez :
+    echo     python "%SCRIPT%" --installer --profil %PROFIL%
+    pause
+    exit /b 1
+)
+
+echo Python : %PY%
+echo.
+
+%PY% "%SCRIPT%" --installer --profil "%PROFIL%"
+if errorlevel 1 (
     echo.
-    echo         import subprocess, sys
-    echo         subprocess.run([sys.executable, '-m', 'pip', 'install', 'paramiko'])
-    echo.
-) else (
-    echo     Python QGIS trouvé : %QGIS_PYTHON%
-    %QGIS_PYTHON% -m pip install --quiet paramiko
-    if errorlevel 1 (
-        echo     ATTENTION : échec installation paramiko. Faites-le manuellement.
-    ) else (
-        echo     paramiko installé avec succès.
-    )
+    echo === Installation INTERROMPUE ===
+    echo Rien n'a ete installe. Le message ci-dessus dit pourquoi.
+    pause
+    exit /b 1
 )
 
 echo.
-echo === Installation terminée ===
-echo Redémarrez QGIS et activez le plugin via Extensions ^> Gérer les extensions.
+echo === Installation terminee ===
+echo Dans QGIS : Extensions ^> Gerer les extensions, cochez
+echo   - LizPack Publisher            (production)
+echo   - LizPack Publisher (accept)   (recette)
+echo Les deux cohabitent : menus, reglages et connexions sont separes.
 echo.
 pause

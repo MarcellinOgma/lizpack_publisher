@@ -32,17 +32,7 @@ Deux principes tiennent tout le module :
 """
 
 from . import journal
-
-# psycopg2 compose les requetes en tenant les identifiants a part, au lieu
-# de les coller dans une chaine. C'est plus sur que citer() — la
-# bibliotheque connait ses propres regles d'echappement — et cela evite au
-# passage un signalement d'analyse statique qu'il aurait fallu museler.
-# Absent hors de QGIS ou sur une installation sans PostGIS : les controles
-# qui en dependent se contentent alors de ne rien affirmer.
-try:
-    from psycopg2 import sql as psql
-except ImportError:
-    psql = None
+from .i18n import tr
 
 # Gravites, de la plus forte a la plus faible
 GRAVE, MOYEN, MINEUR = 'grave', 'moyen', 'mineur'
@@ -59,18 +49,6 @@ def citer(nom):
     return '"' + str(nom).replace('"', '""') + '"'
 
 
-def cible_sql(schema, table):
-    return f'{citer(schema)}.{citer(table)}'
-
-
-def nom_index(table, colonne, suffixe='gist'):
-    """Nom d'index lisible et previsible, tronque a la limite de PostgreSQL.
-
-    Sans nom explicite, PostgreSQL en choisit un et l'utilisateur doit
-    aller le chercher pour defaire l'operation.
-    """
-    base = f'{table}_{colonne}_{suffixe}'.replace(' ', '_')
-    return base[:63]
 
 
 class Probleme:
@@ -106,580 +84,64 @@ class Probleme:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Ce que le diagnostic ne regarde pas
+# Le diagnostic vient du serveur
 # ══════════════════════════════════════════════════════════════════════
+#
+# Les controles ci-dessous ont ete deplaces dans LizPack
+# (`backend/application/file_manager/diagnostic_pg.py`) et sont desormais
+# demandes par l'API. Deux implementations du meme controle finissaient par
+# diverger, et le plugin ne pourrait de toute facon pas diagnostiquer sans le
+# serveur : c'est de lui qu'il tient les identifiants de la base.
+#
+# Ce qui reste ici est ce que le serveur ne fait pas : APPLIQUER les
+# corrections, en se connectant en direct, et produire les exports.
 
-# Schemas de service. « lizmap » abrite les tables de l'application
-# elle-meme, qui ne sont pas des donnees cartographiques.
-SCHEMAS_EXCLUS = (
-    'pg_catalog', 'information_schema', 'topology',
-    'tiger', 'tiger_data', 'lizmap',
-)
-
-# Tables de service reconnaissables a leur nom : PostGIS (spatial_ref_sys
-# et ses vues), QGIS (styles et projets stockes en base), et Lizmap, dont
-# les tables se rangent parfois dans le meme schema que les donnees.
-TABLES_EXCLUES = (
-    'spatial_ref_sys', 'layer_styles', 'qgis_projects',
-    'geometry_columns', 'geography_columns',
-    'raster_columns', 'raster_overviews',
-)
-
-# Prefixes des tables applicatives de Lizmap et de son socle Jelix.
-PREFIXES_EXCLUS = '^(lizmap_|jacl2|jlx_|jauth|jcommunity_|jsession|jpref)'
-
-
-def filtre_sql(schema, table):
-    """Condition SQL ecartant les tables de service.
-
-    Une seule definition pour les six controles : sans cela, en ajouter
-    un revenait a oublier l'exclusion quelque part.
-    """
-    schemas = ', '.join(f"'{n}'" for n in SCHEMAS_EXCLUS)
-    tables = ', '.join(f"'{n}'" for n in TABLES_EXCLUES)
-    return (f'{schema} NOT IN ({schemas})\n'
-            f'  AND {table} NOT IN ({tables})\n'
-            f"  AND {table} !~ '{PREFIXES_EXCLUS}'")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Requetes de diagnostic
-# ══════════════════════════════════════════════════════════════════════
-
-# Colonnes geometriques depourvues d'index spatial.
-# Sans index, chaque affichage de carte lit la table entiere.
-SQL_SANS_INDEX = """
-SELECT g.f_table_schema, g.f_table_name, g.f_geometry_column,
-       COALESCE(c.reltuples::bigint, 0)
-FROM geometry_columns g
-JOIN pg_class     c ON c.relname = g.f_table_name
-JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = g.f_table_schema
-WHERE {filtre_index}
-  AND NOT EXISTS (
-      SELECT 1 FROM pg_index i
-      JOIN pg_class ic ON ic.oid = i.indexrelid
-      JOIN pg_am   am  ON am.oid = ic.relam
-      JOIN pg_attribute a
-        ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey)
-      WHERE i.indrelid = c.oid
-        AND am.amname = 'gist'
-        AND a.attname = g.f_geometry_column
-  )
-ORDER BY c.reltuples DESC
-"""
-
-# Tables geometriques sans clef primaire entiere.
-# QGIS a besoin d'un identifiant entier unique ; a defaut il lit toute la
-# table pour fabriquer ses identifiants d'entite.
-SQL_SANS_CLEF = """
-SELECT n.nspname, c.relname, c.oid, COALESCE(c.reltuples::bigint, 0),
-       EXISTS (SELECT 1 FROM pg_constraint k
-               WHERE k.conrelid = c.oid AND k.contype = 'p') AS a_une_clef
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind = 'r'
-  AND {filtre_classe}
-  AND EXISTS (SELECT 1 FROM geometry_columns g
-              WHERE g.f_table_schema = n.nspname AND g.f_table_name = c.relname)
-  -- Ni clef primaire entiere...
-  AND NOT EXISTS (
-      SELECT 1 FROM pg_constraint k
-      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (k.conkey)
-      JOIN pg_type t ON t.oid = a.atttypid
-      WHERE k.conrelid = c.oid AND k.contype = 'p'
-        AND t.typname IN ('int2','int4','int8')
-  )
-  -- ... ni simple colonne entiere unique et non nulle, qui suffit
-  -- pourtant a QGIS pour identifier ses entites.
-  AND NOT EXISTS (
-      SELECT 1 FROM pg_index i
-      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
-      JOIN pg_type t ON t.oid = a.atttypid
-      WHERE i.indrelid = c.oid AND i.indisunique
-        AND i.indnatts = 1 AND a.attnotnull
-        AND t.typname IN ('int2','int4','int8')
-  )
-ORDER BY c.reltuples DESC
-"""
-
-# Colonnes entieres qui pourraient servir de clef. Les noms usuels
-# d'abord : c'est presque toujours l'une d'elles.
-SQL_CANDIDATS = """
-SELECT a.attname, a.attnotnull, t.typname
-FROM pg_attribute a
-JOIN pg_type t ON t.oid = a.atttypid
-WHERE a.attrelid = %s AND a.attnum > 0 AND NOT a.attisdropped
-  AND t.typname IN ('int2','int4','int8')
--- Un int4 d'abord : QGIS Serveur refuse le bigint comme clef primaire, et
--- proposer une colonne int8 reviendrait a creer le defaut suivant.
-ORDER BY CASE t.typname WHEN 'int4' THEN 0 WHEN 'int2' THEN 1 ELSE 2 END,
-         CASE lower(a.attname)
-           WHEN 'fid' THEN 0 WHEN 'id' THEN 1 WHEN 'gid' THEN 2
-           WHEN 'objectid' THEN 3 WHEN 'ogc_fid' THEN 4 ELSE 5 END,
-         a.attnum
-"""
-
-# Au-dela, on renonce a verifier l'unicite : la lecture complete de la
-# table couterait plus cher que le diagnostic entier.
-SEUIL_VERIFICATION_UNICITE = 2000000
-
-# Requetes composees par psycopg2 : les identifiants restent des objets
-# Identifier, jamais du texte concatene.
-if psql is not None:
-    MODELE_UNICITE = psql.SQL(
-        'SELECT count(*), count(DISTINCT {col}), count(*) - count({col}) '
-        'FROM {table}'
-    )
-    MODELE_MAXIMUM = psql.SQL('SELECT COALESCE(MAX({col}), 0) FROM {table}')
-else:
-    MODELE_UNICITE = MODELE_MAXIMUM = None
-
-# Suggestion affichee a l'utilisateur, jamais executee par le plugin.
-# Ecrite comme un gabarit nomme plutot qu'assemblee sur place : le texte
-# reste lisible, et rien ne ressemble a une requete construite a la volee.
-MODELE_DECOUPAGE = (
-    '-- Table derivee, a substituer dans le projet :\n'
-    'CREATE TABLE {decoupee} AS\n'
-    '  SELECT *, ST_Subdivide({geom}, 256) AS geom_decoupee\n'
-    '  FROM {cible};\n'
-    'CREATE INDEX ON {decoupee} USING GIST (geom_decoupee);'
-)
-
-# Statistiques absentes ou perimees : le planificateur choisit alors des
-# plans au hasard, et ignore souvent les index disponibles.
-SQL_STATISTIQUES = """
-SELECT s.schemaname, s.relname,
-       COALESCE(c.reltuples::bigint, 0),
-       s.n_mod_since_analyze,
-       (s.last_analyze IS NULL AND s.last_autoanalyze IS NULL) AS jamais
-FROM pg_stat_user_tables s
-JOIN pg_class c ON c.oid = s.relid
-WHERE {filtre_stat_joint}
-  AND (
-      (s.last_analyze IS NULL AND s.last_autoanalyze IS NULL AND c.reltuples > 0)
-      OR s.n_mod_since_analyze > GREATEST(1000, c.reltuples * 0.1)
-  )
-ORDER BY s.n_mod_since_analyze DESC
-"""
-
-# Lignes mortes accumulees : la table occupe et fait lire plus que son
-# contenu reel.
-SQL_LIGNES_MORTES = """
-SELECT schemaname, relname, n_live_tup, n_dead_tup
-FROM pg_stat_user_tables
-WHERE {filtre_stat}
-  AND n_dead_tup > 1000
-  AND n_dead_tup > n_live_tup * 0.2
-ORDER BY n_dead_tup DESC
-"""
-
-# Geometries tres detaillees. Leur boite englobante couvre tout, si bien
-# que l'index spatial ne filtre plus rien.
-SQL_GEOMETRIES_LOURDES = """
-SELECT f_table_schema, f_table_name, f_geometry_column
-FROM geometry_columns
-WHERE {filtre_geom}
-  AND type ILIKE '%POLYGON%'
-"""
-
-SQL_SOMMETS = 'SELECT COALESCE(MAX(ST_NPoints({geom})), 0) FROM {cible}'
-
-# Noms de table commencant ou finissant par une espace. PostgreSQL les
-# accepte, mais ils obligent a citer le nom partout et se pretent aux
-# confusions : deux tables peuvent alors ne differer que par une espace
-# invisible. Les interfaces affichent souvent le nom detoure, ce qui rend
-# le defaut indecelable a l'oeil.
-SQL_NOMS_ESPACES = """
-SELECT n.nspname, c.relname
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r','v','m')
-  AND {filtre_classe}
-  AND c.relname <> btrim(c.relname)
-ORDER BY c.relname
-"""
-
-# Clefs primaires en bigint. QGIS Serveur ne les accepte pas : le plugin
-# Lizmap le signale lui-meme (« Primary key should be an integer int4 …
-# neither a bigint nor an integer8 »), et les outils de Lizmap Web Client
-# — zoom sur une entite, filtrage — cessent de fonctionner sur la couche.
-SQL_CLEF_BIGINT = """
-SELECT n.nspname, c.relname, a.attname, c.oid,
-       COALESCE(c.reltuples::bigint, 0),
-       EXISTS (SELECT 1 FROM pg_constraint f
-               WHERE f.confrelid = c.oid AND f.contype = 'f') AS referencee
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-JOIN pg_constraint k ON k.conrelid = c.oid AND k.contype = 'p'
-JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (k.conkey)
-JOIN pg_type t ON t.oid = a.atttypid
-WHERE c.relkind = 'r'
-  AND t.typname = 'int8'
-  AND {filtre_classe}
-  AND EXISTS (SELECT 1 FROM geometry_columns g
-              WHERE g.f_table_schema = n.nspname AND g.f_table_name = c.relname)
-ORDER BY c.relname
-"""
-
-# Au-dela, la valeur ne tient plus dans un entier 32 bits.
-MAX_INT4 = 2147483647
-
-SEUIL_SOMMETS = 10000
-
-# Les requetes ci-dessus portent des gabarits {filtre_*} : on les remplit
-# une fois, ici, plutot que dans chaque appel.
-_FILTRES = {
-    'filtre_index':  filtre_sql('g.f_table_schema', 'g.f_table_name'),
-    'filtre_classe': filtre_sql('n.nspname', 'c.relname'),
-    'filtre_stat':       filtre_sql('schemaname', 'relname'),
-    # La requete des statistiques joint pg_class : relname y existe des
-    # deux cotes et doit etre qualifie.
-    'filtre_stat_joint': filtre_sql('s.schemaname', 's.relname'),
-    'filtre_geom':   filtre_sql('f_table_schema', 'f_table_name'),
+# Le serveur classe en bloquant / important / remarque ; le plugin en grave /
+# moyen / mineur. Une seule table de correspondance, ici.
+GRAVITES_SERVEUR = {
+    'bloquant': GRAVE,
+    'important': MOYEN,
+    'remarque': MINEUR,
 }
-SQL_SANS_INDEX     = SQL_SANS_INDEX.format(**_FILTRES)
-SQL_STATISTIQUES   = SQL_STATISTIQUES.format(**_FILTRES)
-SQL_SANS_CLEF      = SQL_SANS_CLEF.format(**_FILTRES)
-SQL_LIGNES_MORTES  = SQL_LIGNES_MORTES.format(**_FILTRES)
-SQL_GEOMETRIES_LOURDES = SQL_GEOMETRIES_LOURDES.format(**_FILTRES)
-SQL_NOMS_ESPACES   = SQL_NOMS_ESPACES.format(**_FILTRES)
-SQL_CLEF_BIGINT    = SQL_CLEF_BIGINT.format(**_FILTRES)
 
 
-def _colonne_existe(curseur, oid, nom):
-    """Une colonne de ce nom est-elle deja presente ?"""
-    curseur.execute(
-        'SELECT 1 FROM pg_attribute WHERE attrelid = %s AND attname = %s '
-        'AND attnum > 0 AND NOT attisdropped', (oid, nom),
+def depuis_signalement(donnees):
+    """Reconstruit un `Probleme` a partir d'un signalement du serveur."""
+    cible = donnees.get('cible') or ''
+    schema, _, table = cible.partition('.')
+    detail = ' '.join(filter(None, (
+        donnees.get('constat', ''), donnees.get('consequence', ''),
+    )))
+    return Probleme(
+        table or cible, schema or 'public',
+        donnees.get('titre') or donnees.get('constat', '')[:60],
+        detail,
+        GRAVITES_SERVEUR.get(donnees.get('severite'), MOYEN),
+        sql=donnees.get('sql'),
+        automatique=bool(donnees.get('automatique')),
+        # Une correction que le serveur ne declare pas sure reste applicable,
+        # mais seulement apres accord explicite de l'utilisateur.
+        confirmable=bool(donnees.get('sql')) and not donnees.get('automatique'),
+        consequence=donnees.get('solution', ''),
+        annulation=donnees.get('annulation', ''),
     )
-    return curseur.fetchone() is not None
 
 
-def _colonne_utilisable(curseur, oid, schema, table, lignes):
-    """Cherche une colonne entiere qui pourrait servir de clef.
-
-    Retourne (nom, utilisable, type). Un nom sans utilisable signifie
-    qu'une colonne plausible existe mais porte des doublons ou des valeurs
-    nulles — l'information vaut la peine d'etre dite a l'utilisateur.
-
-    L'unicite se verifie sur les donnees, pas sur le schema : une colonne
-    « id » sans contrainte contient presque toujours des valeurs uniques,
-    et la declarer coute infiniment moins cher que d'ajouter une colonne.
-    """
-    if lignes > SEUIL_VERIFICATION_UNICITE:
-        return None, False, None   # trop gros pour verifier a bon compte
-
-    if psql is None:
-        return None, False, None   # sans psycopg2, on n'affirme rien
-
-    curseur.execute(SQL_CANDIDATS, (oid,))
-    candidats = curseur.fetchall()
-    premier = None
-    for nom, non_nulle, typname in candidats:
-        try:
-            curseur.execute(
-                MODELE_UNICITE.format(
-                    col=psql.Identifier(nom),
-                    table=psql.Identifier(schema, table),
-                )
-            )
-            total, distincts, nuls = curseur.fetchone()
-        except Exception as e:
-            journal.ignorer(e, f'unicite de la colonne {nom}')
-            continue
-        if total and total == distincts and not nuls:
-            return nom, True, typname
-        if premier is None:
-            premier = nom
-    return premier, False, None
-
-
-def diagnostiquer(curseur, journal=None):
-    """Interroge la base et retourne la liste des problemes constates.
-
-    `curseur` est un curseur DBAPI ; `journal` un callable optionnel pour
-    suivre l'avancement. Aucune ecriture n'est faite.
-    """
-    def dire(message):
-        if journal:
-            journal(message)
-
-    problemes = []
-
-    # ── Index spatiaux ────────────────────────────────────────────────
-    dire('Recherche des index spatiaux manquants…')
-    curseur.execute(SQL_SANS_INDEX)
-    for schema, table, geom, lignes in curseur.fetchall():
-        index = nom_index(table, geom)
-        problemes.append(Probleme(
-            table, schema,
-            'Index spatial manquant',
-            f'La colonne « {geom} » n\'a pas d\'index GIST. '
-            + (f'Chaque affichage lit les {lignes} lignes de la table.'
-               if lignes > 0 else
-               'Chaque affichage lit la table entière.'),
-            GRAVE,
-            sql=(f'CREATE INDEX IF NOT EXISTS {citer(index)} '
-                 f'ON {cible_sql(schema, table)} USING GIST ({citer(geom)})'),
-            automatique=True,
-            annulation=f'DROP INDEX {citer(schema)}.{citer(index)}',
-        ))
-
-    # ── Clefs primaires ───────────────────────────────────────────────
-    dire('Vérification des clefs primaires…')
-    curseur.execute(SQL_SANS_CLEF)
-    for schema, table, oid, lignes, a_une_clef in curseur.fetchall():
-        cible = cible_sql(schema, table)
-        colonne, unique, typcol = _colonne_utilisable(
-            curseur, oid, schema, table, lignes)
-
-        if colonne and unique:
-            # Une colonne convient deja : la declarer coute un index, pas
-            # une reecriture de la table, et n'ajoute rien aux formulaires.
-            # Une clef en bigint est refusee par QGIS Serveur : la
-            # convertir doit faire partie de la meme correction, sinon on
-            # remplace un defaut par le suivant.
-            conversion = ''
-            if typcol == 'int8':
-                conversion = (f'ALTER TABLE {cible} '
-                              f'ALTER COLUMN {citer(colonne)} TYPE integer;\n')
-
-            if a_une_clef:
-                index = nom_index(table, colonne, 'unique')
-                correction = (conversion +
-                              f'CREATE UNIQUE INDEX IF NOT EXISTS '
-                              f'{citer(index)} ON {cible} ({citer(colonne)})')
-                annulation = f'DROP INDEX {citer(schema)}.{citer(index)}'
-                consequence = (f'Déclare « {colonne} », qui contient déjà des '
-                               'valeurs uniques, comme identifiant utilisable '
-                               'par QGIS. La clef primaire existante, non '
-                               'entière, est conservée.')
-            else:
-                # Nommer la contrainte plutot que de deviner le nom que
-                # PostgreSQL lui donnerait : l'annulation devient exacte.
-                contrainte = nom_index(table, colonne, 'pkey')
-                correction = (conversion +
-                              f'ALTER TABLE {cible} ADD CONSTRAINT '
-                              f'{citer(contrainte)} PRIMARY KEY '
-                              f'({citer(colonne)})')
-                annulation = (f'ALTER TABLE {cible} DROP CONSTRAINT '
-                              f'{citer(contrainte)}')
-                consequence = (f'Déclare « {colonne} », qui contient déjà des '
-                               'valeurs uniques, comme clef primaire. Aucune '
-                               'colonne ajoutée.')
-            detail = (f'La colonne « {colonne} » contient déjà des valeurs '
-                      'uniques et non nulles, mais rien ne le déclare : QGIS '
-                      "l'ignore et lit toute la table pour fabriquer ses "
-                      "identifiants d'entité.")
-            if conversion:
-                detail += (" Elle est de type bigint : la correction la "
-                           "convertit d'abord en integer, sans quoi QGIS "
-                           'Serveur refuserait la clef.')
-                consequence = ('Convertit la colonne de bigint en integer, '
-                               'ce qui réécrit la table, puis ' +
-                               consequence[0].lower() + consequence[1:])
-        else:
-            nouvelle = 'fid' if not _colonne_existe(curseur, oid, 'fid') else 'fid_qgis'
-            if a_une_clef:
-                # serial et non bigserial : bigserial produit un int8,
-                # que QGIS Serveur refuse comme clef primaire.
-                correction = (f'ALTER TABLE {cible} '
-                              f'ADD COLUMN {citer(nouvelle)} serial '
-                              'NOT NULL UNIQUE')
-                annulation = (f'ALTER TABLE {cible} '
-                              f'DROP COLUMN {citer(nouvelle)}')
-                consequence = (f'Ajoute une colonne « {nouvelle} » entière et '
-                               'unique. La clef primaire existante, non '
-                               'entière, est conservée.')
-            else:
-                contrainte = nom_index(table, nouvelle, 'pkey')
-                correction = (f'ALTER TABLE {cible} '
-                              f'ADD COLUMN {citer(nouvelle)} serial, '
-                              f'ADD CONSTRAINT {citer(contrainte)} '
-                              f'PRIMARY KEY ({citer(nouvelle)})')
-                annulation = (f'ALTER TABLE {cible} '
-                              f'DROP COLUMN {citer(nouvelle)}')
-                consequence = (f'Ajoute une colonne « {nouvelle} » comme clef '
-                               'primaire.')
-            manque = ('aucune colonne entière ne convient'
-                      if colonne is None else
-                      f'la colonne « {colonne} » contient des doublons ou des '
-                      'valeurs nulles')
-            detail = (f'QGIS lit toute la table pour fabriquer ses identifiants '
-                      f"d'entité : {manque}. L'édition et la collecte QField "
-                      'en dépendent aussi.')
-
-        problemes.append(Probleme(
-            table, schema,
-            'Pas de clef primaire entière',
-            detail, GRAVE,
-            sql=correction,
-            confirmable=True,
-            consequence=(consequence + " La table est verrouillée le temps de "
-                         "l'opération."),
-            annulation=annulation,
-        ))
-
-    # ── Clefs primaires en bigint ─────────────────────────────────────
-    dire('Contrôle du type des clefs primaires…')
-    curseur.execute(SQL_CLEF_BIGINT)
-    for schema, table, colonne, oid, lignes, referencee in curseur.fetchall():
-        cible = cible_sql(schema, table)
-        # Convertir n'a de sens que si les valeurs tiennent dans un int4 et
-        # qu'aucune clef etrangere ne pointe vers la colonne : sinon il
-        # faudrait aussi convertir les tables qui la referencent.
-        tient = None
-        try:
-            curseur.execute(
-                MODELE_MAXIMUM.format(
-                    col=psql.Identifier(colonne),
-                    table=psql.Identifier(schema, table),
-                )
-            )
-            tient = (curseur.fetchone()[0] or 0) <= MAX_INT4
-        except Exception as e:
-            journal.ignorer(e, f'valeur maximale de {colonne}')
-            tient = None
-
-        convertible = bool(tient) and not referencee
-        if convertible:
-            correction = (f'ALTER TABLE {cible} '
-                          f'ALTER COLUMN {citer(colonne)} TYPE integer')
-            consequence = (
-                f'Convertit « {colonne} » de bigint en integer. La table est '
-                'réécrite et reste verrouillée pendant l\'opération ; les '
-                'valeurs sont conservées.'
-            )
-            annulation = (f'ALTER TABLE {cible} '
-                          f'ALTER COLUMN {citer(colonne)} TYPE bigint')
-        else:
-            correction = (f'-- Conversion a examiner a la main :\n'
-                          f'ALTER TABLE {cible} '
-                          f'ALTER COLUMN {citer(colonne)} TYPE integer;')
-            consequence = ''
-            annulation = ''
-
-        if referencee:
-            obstacle = ("d'autres tables référencent cette colonne : elles "
-                        'doivent être converties en même temps')
-        elif tient is False:
-            obstacle = ('certaines valeurs dépassent la capacité d\'un entier '
-                        '32 bits')
-        elif tient is None:
-            obstacle = "la table n'a pas pu être lue"
-        else:
-            obstacle = ''
-
-        detail = (
-            f'La clef primaire « {colonne} » est un bigint. QGIS Serveur '
-            'attend un entier 32 bits : le zoom sur une entité et le '
-            'filtrage cessent de fonctionner dans Lizmap.'
-        )
-        if obstacle:
-            detail += f' Conversion non automatisable : {obstacle}.'
-
-        problemes.append(Probleme(
-            table, schema,
-            'Clef primaire en bigint',
-            detail, GRAVE,
-            sql=correction,
-            confirmable=convertible,
-            consequence=consequence,
-            annulation=annulation,
-        ))
-
-    # ── Statistiques ──────────────────────────────────────────────────
-    dire('Contrôle des statistiques…')
-    curseur.execute(SQL_STATISTIQUES)
-    for schema, table, lignes, modifs, jamais in curseur.fetchall():
-        motif = ('aucune statistique n\'a jamais été calculée'
-                 if jamais else
-                 f'{modifs} lignes modifiées depuis le dernier calcul')
-        problemes.append(Probleme(
-            table, schema,
-            'Statistiques à rafraîchir',
-            f'{motif.capitalize()}. Sans statistiques à jour, PostgreSQL '
-            'ignore souvent les index disponibles.',
-            MOYEN,
-            sql=f'ANALYZE {cible_sql(schema, table)}',
-            automatique=True,
-        ))
-
-    # ── Lignes mortes ─────────────────────────────────────────────────
-    dire('Recherche des lignes mortes…')
-    curseur.execute(SQL_LIGNES_MORTES)
-    for schema, table, vivantes, mortes in curseur.fetchall():
-        problemes.append(Probleme(
-            table, schema,
-            'Espace mort à récupérer',
-            f'{mortes} lignes mortes pour {vivantes} vivantes. '
-            'La table est lue plus longtemps qu\'elle ne le devrait.',
-            MINEUR,
-            sql=f'VACUUM ANALYZE {cible_sql(schema, table)}',
-            automatique=True,
-        ))
-
-    # ── Geometries trop detaillees ────────────────────────────────────
-    dire('Mesure du détail des polygones…')
-    curseur.execute(SQL_GEOMETRIES_LOURDES)
-    for schema, table, geom in curseur.fetchall():
-        cible = cible_sql(schema, table)
-        try:
-            curseur.execute(SQL_SOMMETS.format(geom=citer(geom), cible=cible))
-            sommets = curseur.fetchone()[0] or 0
-        except Exception as e:
-            journal.ignorer(e, f'comptage des sommets de {cible}')
-            continue
-        if sommets < SEUIL_SOMMETS:
-            continue
-        decoupee = cible_sql(schema, table + '_decoupee')
-        problemes.append(Probleme(
-            table, schema,
-            'Polygones très détaillés',
-            f'Jusqu\'à {sommets} sommets pour une seule entité. Sa boîte '
-            'englobante couvre une large zone : l\'index spatial ne filtre '
-            'plus rien. Un découpage par ST_Subdivide accélère nettement.',
-            MOYEN,
-            # Suggestion affichee a l'utilisateur, jamais executee par le
-            # plugin : ce probleme porte automatique=False. Les identifiants
-            # y sont malgre tout cites par citer(), qui double les
-            # guillemets internes.
-            sql=MODELE_DECOUPAGE.format(
-                decoupee=decoupee, geom=citer(geom), cible=cible,
-            ),
-            automatique=False,   # cree une table : decision de modelisation
-        ))
-
-    # ── Noms de table ─────────────────────────────────────────────────
-    dire('Contrôle des noms de table…')
-    curseur.execute(SQL_NOMS_ESPACES)
-    for schema, table in curseur.fetchall():
-        propre = table.strip()
-        problemes.append(Probleme(
-            table, schema,
-            'Nom de table avec espace',
-            f'Le nom « {table} » commence ou finit par une espace. Il doit '
-            'être cité partout, et deux tables peuvent ne différer que par '
-            'une espace invisible.',
-            MINEUR,
-            sql=(f'-- Renommer casse les projets qui référencent l\'ancien nom.\n'
-                 f'ALTER TABLE {cible_sql(schema, table)} '
-                 f'RENAME TO {citer(propre)};'),
-            automatique=False,   # renommer casserait les projets existants
-        ))
-
-    ordre = {GRAVE: 0, MOYEN: 1, MINEUR: 2}
-    problemes.sort(key=lambda p: (ordre[p.gravite], p.cible))
-    return problemes
+def diagnostiquer_par_api(session, avancement=None):
+    """Demande le diagnostic au serveur et rend des `Probleme`."""
+    if avancement:
+        avancement(tr('Diagnostic demandé au serveur LizPack…'))
+    signalements = session.diagnostiquer_base()
+    return [depuis_signalement(d) for d in signalements]
 
 
 def _niveau(probleme):
     """Comment la correction sera appliquee, en clair."""
     if probleme.automatique:
-        return 'Automatique'
+        return tr('Automatique')
     if probleme.confirmable:
-        return 'Sur confirmation'
-    return 'A la main'
+        return tr('Sur confirmation')
+    return tr('À la main')
 
 
 def exporter_csv(problemes, instance, base):
@@ -694,10 +156,10 @@ def exporter_csv(problemes, instance, base):
 
     tampon = _io.StringIO()
     graveur = csv.writer(tampon, delimiter=';', quoting=csv.QUOTE_MINIMAL)
-    graveur.writerow(['Instance', instance, 'Base', base])
+    graveur.writerow([tr('Instance'), instance, tr('Base'), base])
     graveur.writerow([
-        'Gravite', 'Schema', 'Table', 'Probleme', 'Correction',
-        'Detail', 'SQL', 'Consequence', 'Annulation',
+        tr('Gravité'), tr('Schéma'), tr('Table'), tr('Problème'), tr('Correction'),
+        tr('Détail'), 'SQL', tr('Conséquence'), tr('Annulation'),
     ])
     for p in problemes:
         graveur.writerow([
@@ -716,20 +178,19 @@ def exporter_sql(problemes, instance, base):
     import datetime
 
     lignes = [
-        '-- Diagnostic de la base LizPack',
-        f'-- Instance : {instance}',
-        f'-- Base     : {base}',
-        f'-- Genere   : {datetime.datetime.now():%Y-%m-%d %H:%M}',
-        f'-- {len(problemes)} point(s) releve(s)',
+        '-- ' + tr('Diagnostic de la base LizPack'),
+        '-- ' + tr('Instance : {0}', instance),
+        '-- ' + tr('Base : {0}', base),
+        '-- ' + tr('Généré le : {0}', f'{datetime.datetime.now():%Y-%m-%d %H:%M}'),
+        '-- ' + tr('{0} point(s) relevé(s)', len(problemes)),
         '--',
-        '-- Les corrections « a la main » sont commentees : relisez-les',
-        '-- avant de les activer.',
+        '-- ' + tr('Les corrections « à la main » sont commentées : relisez-les avant de les activer.'),
         '',
     ]
     ordre = [
-        ('Corrections sans risque', lambda p: p.automatique),
-        ('Corrections a confirmer', lambda p: p.confirmable),
-        ('A traiter a la main', lambda p: not p.applicable),
+        (tr('Corrections sans risque'), lambda p: p.automatique),
+        (tr('Corrections à confirmer'), lambda p: p.confirmable),
+        (tr('À traiter à la main'), lambda p: not p.applicable),
     ]
     for titre, garde in ordre:
         lot = [p for p in problemes if garde(p)]
@@ -738,10 +199,10 @@ def exporter_sql(problemes, instance, base):
         lignes += ['-- ' + '=' * 68, f'-- {titre} ({len(lot)})',
                    '-- ' + '=' * 68, '']
         for p in lot:
-            lignes.append(f'-- {p.cible} — {p.titre}')
+            lignes.append(f'-- {p.cible} : {p.titre}')
             lignes.append(f'--    {p.detail}')
             if p.consequence:
-                lignes.append(f'--    Consequence : {p.consequence}')
+                lignes.append('--    ' + tr('Conséquence : {0}', p.consequence))
             corps = (p.sql or '').strip()
             if not corps:
                 lignes.append('')
@@ -755,12 +216,12 @@ def exporter_sql(problemes, instance, base):
                 corps += ';'
             lignes.append(corps)
             if p.annulation:
-                lignes.append(f'--    Pour defaire : {p.annulation};')
+                lignes.append('--    ' + tr('Pour défaire : {0};', p.annulation))
             lignes.append('')
     return '\n'.join(lignes)
 
 
-def appliquer(connexion, problemes, journal=None):
+def appliquer(connexion, problemes, avancement=None):
     """Applique les corrections marquees comme sures.
 
     Chaque instruction est jouee isolement : une table verrouillee ou
@@ -768,8 +229,8 @@ def appliquer(connexion, problemes, journal=None):
     (reussies, echouees).
     """
     def dire(message):
-        if journal:
-            journal(message)
+        if avancement:
+            avancement(message)
 
     reussies, echouees = [], []
     # VACUUM refuse de s'executer dans une transaction.
