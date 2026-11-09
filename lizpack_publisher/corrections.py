@@ -47,6 +47,20 @@ def _couches_vecteur(projet):
     return [c for c in projet.mapLayers().values() if c.type() == QgsMapLayer.VectorLayer]
 
 
+def _type_geometrie(cnx, schema, table):
+    """Type déclaré de la colonne géométrique, lu par l'API de QGIS plutôt
+    que par une requête SQL composée : « MultiPolygon », « PointZ »… ou
+    « Geometry » quand la colonne mêle plusieurs types ou reste inconnue."""
+    from qgis.core import QgsWkbTypes
+    try:
+        types = {QgsWkbTypes.displayString(g.wkbType)
+                 for g in cnx.table(schema, table).geometryColumnTypes()}
+    except Exception:
+        return 'Geometry'
+    types.discard('')
+    return types.pop() if len(types) == 1 else 'Geometry'
+
+
 def _reprojeter_table(couche, cible):
     """Reprojette la table PostGIS d'une couche, dans la base."""
     from qgis.core import (QgsDataSourceUri, QgsProviderRegistry,
@@ -57,16 +71,10 @@ def _reprojeter_table(couche, cible):
     meta = QgsProviderRegistry.instance().providerMetadata('postgres')
     cnx = meta.createConnection(uri.uri(False), {})
 
-    def lit(v):
-        return "'" + str(v).replace("'", "''") + "'"
-
     def ident(v):
         return '"' + str(v).replace('"', '""') + '"'
 
-    lignes = cnx.executeSql(
-        'SELECT type FROM geometry_columns WHERE f_table_schema = {} AND '
-        'f_table_name = {} AND f_geometry_column = {}'.format(lit(schema), lit(table), lit(colonne)))
-    typ = (lignes[0][0] if lignes and lignes[0] else '') or 'Geometry'
+    typ = _type_geometrie(cnx, schema, table)
     cnx.executeSql(
         'ALTER TABLE {s}.{t} ALTER COLUMN {c} TYPE geometry({typ}, {srid}) '
         'USING ST_Transform({c}, {srid})'.format(
